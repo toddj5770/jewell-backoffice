@@ -85,7 +85,7 @@ export default function TransactionDetail() {
     const tot=tas.reduce((s,t)=>s+Number(t.split_value||0),0)
     if(tas.length>1&&tas[0].split_type==='percent'&&Math.abs(tot-100)>0.01){if(!window.confirm(`Splits total ${tot}% not 100%. Save?`)){setSaving(false);return}}
     let tid=id
-    const d={...txn,sale_price:txn.sale_price?Number(txn.sale_price):null,selling_commission_pct:txn.selling_commission_pct?Number(txn.selling_commission_pct):null}
+    const d={...txn,sale_price:txn.sale_price?Number(txn.sale_price):null,selling_commission_pct:txn.selling_commission_pct?Number(txn.selling_commission_pct):null,contract_acceptance_date:txn.contract_acceptance_date||null,estimated_close_date:txn.estimated_close_date||null,close_date:txn.close_date||null}
     if(isNew){const{data,error}=await supabase.from('transactions').insert(d).select().single();if(error){alert(error.message);setSaving(false);return};tid=data.id}
     else await supabase.from('transactions').update(d).eq('id',tid)
     await supabase.from('transaction_agents').delete().eq('transaction_id',tid)
