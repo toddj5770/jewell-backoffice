@@ -25,22 +25,30 @@ export function AuthProvider({ children }) {
   }, [])
 
   async function fetchProfile(userId) {
-    const { data } = await supabase
+    // Simple query - just get the profile row, no joins
+    const { data, error } = await supabase
       .from('profiles')
-      .select('*, agents(*)')
+      .select('id, role, agent_id, first_name, last_name')
       .eq('id', userId)
       .single()
+    
+    if (error) {
+      console.error('Profile fetch error:', error)
+      setLoading(false)
+      return
+    }
     setProfile(data)
     setLoading(false)
   }
 
   async function signIn(email, password) {
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
-    return { error }
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+    return { data, error }
   }
 
   async function signOut() {
     await supabase.auth.signOut()
+    setProfile(null)
   }
 
   const isAdmin = profile?.role === 'broker' || profile?.role === 'admin'
