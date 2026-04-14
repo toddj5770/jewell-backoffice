@@ -252,7 +252,8 @@ export default function Reports() {
       const plan = ta.plans
       const fees = plan?.fees || []
       const feeItem = fees.find(f => f.name === 'Admin Fee')
-      const feeAmt = feeItem?.amt || 0
+      // Admin fee is per transaction, not per agent — only apply to primary agent (index 0)
+      const feeAmt = i === 0 ? (feeItem?.amt || 0) : 0
       const payer = t.admin_fee_payer || feeItem?.payer || 'client'
       const split = ta.split_type === 'dollar' ? ta.split_value : gross * ((ta.split_value || 100) / 100)
       const agentPct = plan?.type === 'cap' ? (plan.cap_levels?.[0]?.pct || 90) : (plan?.agent_pct || 80)
