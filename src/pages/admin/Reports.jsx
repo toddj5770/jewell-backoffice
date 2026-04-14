@@ -596,105 +596,66 @@ export default function Reports() {
         const closedInRange = agentTxns.filter(t => t.status === 'closed')
         const openDeals = agentTxns.filter(t => t.status === 'active' || t.status === 'pending')
 
-        // Section 1: Closed income summary
-        columns = ['Section','Address','City','Role','Close Date','Sale Price','Gross Comm','Agent Split %','Agent Net','Admin Fee','Office Net','Lead Source']
 
+        // Helper: compute a single agent's commission numbers from a transaction
+        function agentCalc(t, ta) {
+          const tas = t.transaction_agents || []
+          const isPrimary = tas.findIndex(x => x.agent_id === ta.agent_id) === 0
+          const plan = ta.plans
+          const agentPct = plan?.type === 'cap' ? (plan.cap_levels?.[0]?.pct || 90) : (plan?.agent_pct || 80)
+          const split = ta.split_type === 'dollar' ? ta.split_value : t.gross_commission * ((ta.split_value || 100) / 100)
+          const feeAmt = isPrimary ? (plan?.fees?.find(f => f.name === 'Admin Fee')?.amt || 0) : 0
+          const payer = t.admin_fee_payer || 'client'
+          let aN = split * (agentPct / 100)
+          let oN = split * ((100 - agentPct) / 100)
+          if (payer === 'agent') aN -= feeAmt
+          else if (payer === 'broker') oN -= feeAmt
+          const offAdmin = (payer === 'client' || payer === 'agent') ? feeAmt : 0
+          return { agentPct, split, aN, oN, offAdmin, feeAmt, isPrimary, role: isPrimary ? 'Primary' : 'Co-Agent' }
+        }
+
+        // Section 1: Closed income summary
+        columns = ['Section','Address','City','Role','Close Date','Sale Price','Agent Gross','Agent Split %','Agent Net','Admin Fee','Office Net','Lead Source']
+
+        let closedAgentNet = 0, closedAgentGross = 0, closedVolume = 0
         closedInRange.forEach(t => {
           const tas = t.transaction_agents || []
-          // When an agent is selected, only show that agent's row
           const tasToShow = aid ? tas.filter(ta => ta.agent_id === aid) : tas
-          tasToShow.forEach((ta) => {
-            const idx = tas.findIndex(t2 => t2 === ta || t2.agent_id === ta.agent_id) // original index for admin fee
-            const plan = ta.plans
-            const agentPct = plan?.type === 'cap' ? (plan.cap_levels?.[0]?.pct || 90) : (plan?.agent_pct || 80)
-            const split = ta.split_type === 'dollar' ? ta.split_value : t.gross_commission * ((ta.split_value || 100) / 100)
-            const feeAmt = idx === 0 ? (plan?.fees?.find(f=>f.name==='Admin Fee')?.amt || 0) : 0
-            const payer = t.admin_fee_payer || 'client'
-            let aN = split * (agentPct / 100)
-            let oN = split * ((100 - agentPct) / 100)
-            if (payer === 'agent') aN -= feeAmt
-            else if (payer === 'broker') oN -= feeAmt
-            const offAdmin = (payer === 'client' || payer === 'agent') ? feeAmt : 0
-            const role = idx === 0 ? 'Primary' : 'Co-Agent'
-            rows.push(['CLOSED', t.street_address + ', ' + t.city, t.city, role, t.close_date || '—', fmt$(t.sale_price), fmt$(t.gross_commission), agentPct + '%', fmt$(aN), fmt$(offAdmin), fmt$(oN + offAdmin), t.lead_source || '—'])
+          tasToShow.forEach(ta => {
+            const c = agentCalc(t, ta)
+            closedAgentNet += c.aN
+            closedAgentGross += c.split
+            closedVolume += (t.sale_price || 0)
+            rows.push(['CLOSED', t.street_address, t.city, c.role, t.close_date||'—', fmt$(t.sale_price), fmt$(c.split), c.agentPct+'%', fmt$(c.aN), fmt$(c.offAdmin), fmt$(c.oN+c.offAdmin), t.lead_source||'—'])
           })
         })
 
-        // Closed totals
         if (closedInRange.length > 0) {
-          const totGross = closedInRange.reduce((s,t) => s + t.gross_commission, 0)
-          const totAgent = closedInRange.reduce((s,t) => {
-            return s + (t.transaction_agents||[]).filter(ta=>!aid||ta.agent_id===aid).reduce((ss,ta,idx) => {
-              const plan=ta.plans; const agentPct=plan?.type==='cap'?(plan.cap_levels?.[0]?.pct||90):(plan?.agent_pct||80)
-              const split=ta.split_type==='dollar'?ta.split_value:t.gross_commission*((ta.split_value||100)/100)
-              const feeAmt=idx===0?(plan?.fees?.find(f=>f.name==='Admin Fee')?.amt||0):0
-              let aN=split*(agentPct/100); if(t.admin_fee_payer==='agent') aN-=feeAmt
-              return ss+aN
-            }, 0)
-          }, 0)
-          rows.push(['CLOSED TOTALS', closedInRange.length + ' deals', '', '', '', fmt$(closedInRange.reduce((s,t)=>s+(t.sale_price||0),0)), fmt$(totGross), '', fmt$(totAgent), '', '', ''])
-          rows.push(['', '', '', '', '', '', '', '', '', '', '', ''])
+          rows.push(['CLOSED TOTALS', closedInRange.length+' deals','','','', fmt$(closedVolume), fmt$(closedAgentGross),'', fmt$(closedAgentNet),'','',''])
+          rows.push(['','','','','','','','','','','',''])
         }
 
         // Section 2: Open pipeline
+        let openAgentNet = 0, openAgentGross = 0, openVolume = 0
         openDeals.forEach(t => {
           const tas = t.transaction_agents || []
-          // When an agent is selected, only show that agent's row
           const tasToShow = aid ? tas.filter(ta => ta.agent_id === aid) : tas
-          tasToShow.forEach((ta) => {
-            const idx = tas.findIndex(t2 => t2 === ta || t2.agent_id === ta.agent_id)
-            const plan = ta.plans
-            const agentPct = plan?.type === 'cap' ? (plan.cap_levels?.[0]?.pct || 90) : (plan?.agent_pct || 80)
-            const split = ta.split_type === 'dollar' ? ta.split_value : t.gross_commission * ((ta.split_value || 100) / 100)
-            const feeAmt = idx === 0 ? (plan?.fees?.find(f=>f.name==='Admin Fee')?.amt || 0) : 0
-            const payer = t.admin_fee_payer || 'client'
-            let aN = split * (agentPct / 100)
-            let oN = split * ((100 - agentPct) / 100)
-            if (payer === 'agent') aN -= feeAmt
-            const role = idx === 0 ? 'Primary' : 'Co-Agent'
-            rows.push(['PIPELINE (' + t.status + ')', t.street_address + ', ' + t.city, t.city, role, t.estimated_close_date || 'TBD', fmt$(t.sale_price), fmt$(t.gross_commission), agentPct + '%', fmt$(aN), fmt$(feeAmt), fmt$(oN), t.lead_source || '—'])
+          tasToShow.forEach(ta => {
+            const c = agentCalc(t, ta)
+            openAgentNet += c.aN
+            openAgentGross += c.split
+            openVolume += (t.sale_price || 0)
+            rows.push(['PIPELINE ('+t.status+')', t.street_address, t.city, c.role, t.estimated_close_date||'TBD', fmt$(t.sale_price), fmt$(c.split), c.agentPct+'%', fmt$(c.aN), fmt$(c.offAdmin), fmt$(c.oN+c.offAdmin), t.lead_source||'—'])
           })
         })
 
         if (openDeals.length > 0) {
-          const totOpenVolume = openDeals.reduce((s,t) => s + (t.sale_price||0), 0)
-          const totOpenGross = openDeals.reduce((s,t) => s + t.gross_commission, 0)
-          const totOpenAgent = openDeals.reduce((s,t) => {
-            return s + (t.transaction_agents||[]).filter(ta=>!aid||ta.agent_id===aid).reduce((ss,ta,idx) => {
-              const plan=ta.plans; const agentPct=plan?.type==='cap'?(plan.cap_levels?.[0]?.pct||90):(plan?.agent_pct||80)
-              const split=ta.split_type==='dollar'?ta.split_value:t.gross_commission*((ta.split_value||100)/100)
-              const feeAmt=idx===0?(plan?.fees?.find(f=>f.name==='Admin Fee')?.amt||0):0
-              let aN=split*(agentPct/100); if(t.admin_fee_payer==='agent') aN-=feeAmt
-              return ss+aN
-            }, 0)
-          }, 0)
-          rows.push(['PIPELINE TOTALS', openDeals.length + ' deals', '', '', '', fmt$(totOpenVolume), fmt$(totOpenGross), '', fmt$(totOpenAgent), '', '', ''])
+          rows.push(['PIPELINE TOTALS', openDeals.length + ' deals', '', '', '', fmt$(openVolume), fmt$(openAgentGross), '', fmt$(openAgentNet), '', '', ''])
         }
 
-        // Grand total (closed + pipeline)
-        const allRows = rows.filter(r => r[0].startsWith('CLOSED') || r[0].startsWith('PIPELINE'))
-        const closedAgentTotal = closedInRange.reduce((s,t) => {
-          return s + (t.transaction_agents||[]).filter(ta=>!aid||ta.agent_id===aid).reduce((ss,ta,idx) => {
-            const plan=ta.plans; const agentPct=plan?.type==='cap'?(plan.cap_levels?.[0]?.pct||90):(plan?.agent_pct||80)
-            const split=ta.split_type==='dollar'?ta.split_value:t.gross_commission*((ta.split_value||100)/100)
-            const feeAmt=idx===0?(plan?.fees?.find(f=>f.name==='Admin Fee')?.amt||0):0
-            let aN=split*(agentPct/100); if(t.admin_fee_payer==='agent') aN-=feeAmt
-            return ss+aN
-          }, 0)
-        }, 0)
-        const pipelineAgentTotal = openDeals.reduce((s,t) => {
-          return s + (t.transaction_agents||[]).filter(ta=>!aid||ta.agent_id===aid).reduce((ss,ta,idx) => {
-            const plan=ta.plans; const agentPct=plan?.type==='cap'?(plan.cap_levels?.[0]?.pct||90):(plan?.agent_pct||80)
-            const split=ta.split_type==='dollar'?ta.split_value:t.gross_commission*((ta.split_value||100)/100)
-            const feeAmt=idx===0?(plan?.fees?.find(f=>f.name==='Admin Fee')?.amt||0):0
-            let aN=split*(agentPct/100); if(t.admin_fee_payer==='agent') aN-=feeAmt
-            return ss+aN
-          }, 0)
-        }, 0)
-        const grandTotalVolume = [...closedInRange,...openDeals].reduce((s,t)=>s+(t.sale_price||0),0)
-        const grandTotalGross = [...closedInRange,...openDeals].reduce((s,t)=>s+t.gross_commission,0)
+        // Grand total — use the already-computed running totals
         rows.push(['', '', '', '', '', '', '', '', '', '', '', ''])
-        rows.push(['GRAND TOTAL', (closedInRange.length + openDeals.length) + ' deals', '', '', '', fmt$(grandTotalVolume), fmt$(grandTotalGross), '', fmt$(closedAgentTotal + pipelineAgentTotal), '', '', ''])
+        rows.push(['GRAND TOTAL', (closedInRange.length + openDeals.length) + ' deals', '', '', '', fmt$(closedVolume + openVolume), fmt$(closedAgentGross + openAgentGross), '', fmt$(closedAgentNet + openAgentNet), '', '', ''])
 
         // Cap progress section
         if (aid && allData) {
