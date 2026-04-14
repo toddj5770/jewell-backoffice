@@ -188,9 +188,10 @@ export default function TransactionDetail() {
     function fp(n){ return '$'+Number(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) }
 
     let lines = ''
-    agentsToShow.forEach(ta => {
+    agentsToShow.forEach((ta, printIdx) => {
       const plan = getPlan(ta)
-      const comm = calcCommission(txn, ta, plan, ytdMap[ta.agent_id]||0)
+      const isPrimaryAgent = tas.indexOf(ta) === 0
+      const comm = calcCommission(txn, ta, plan, ytdMap[ta.agent_id]||0, isPrimaryAgent)
       const ao = agents.find(a=>a.id===ta.agent_id)||ta.agents
       const vol = (Number(txn.sale_price)||0)*((Number(ta.volume_pct)||0)/100)
       const agentName = (ao?.first_name||'') + ' ' + (ao?.last_name||'')
