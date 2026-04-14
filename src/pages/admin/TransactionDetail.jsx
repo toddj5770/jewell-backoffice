@@ -28,6 +28,7 @@ export default function TransactionDetail() {
   const [tab, setTab] = useState('deal')
   const [ytdMap, setYtdMap] = useState({})
   const [disbs, setDisbs] = useState([])
+  const [trustEntries, setTrustEntries] = useState([])
 
   useEffect(() => { loadMeta(); if(!isNew) loadTxn() }, [id])
 
@@ -43,14 +44,16 @@ export default function TransactionDetail() {
   }
 
   async function loadTxn() {
-    const [tr,tar,dr] = await Promise.all([
+    const [tr,tar,dr,ter] = await Promise.all([
       supabase.from('transactions').select('*').eq('id',id).single(),
       supabase.from('transaction_agents').select('*,agents(id,first_name,last_name),plans(*)').eq('transaction_id',id).order('sort_order'),
       supabase.from('disbursements').select('*').eq('transaction_id',id),
+      supabase.from('trust_entries').select('*').eq('transaction_id',id).order('received_date'),
     ])
     if(tr.data) setTxn(tr.data)
     if(tar.data) { setTas(tar.data); loadYTD(tar.data.map(t=>t.agent_id)) }
     if(dr.data) setDisbs(dr.data)
+    if(ter.data) setTrustEntries(ter.data)
     setLoading(false)
   }
 
@@ -171,6 +174,37 @@ export default function TransactionDetail() {
     navigate('/transactions')
   }
 
+  async function addTrustEntry() {
+    const amount = window.prompt('Amount received ($):')
+    if (!amount || isNaN(Number(amount))) return
+    const type = window.prompt('Type (Earnest Money / Option Fee / Down Payment / Other):', 'Earnest Money')
+    if (!type) return
+    const date = window.prompt('Date received (YYYY-MM-DD):', new Date().toISOString().slice(0,10))
+    if (!date) return
+    const notes = window.prompt('Notes (optional):') || ''
+    await supabase.from('trust_entries').insert({
+      transaction_id: id,
+      type,
+      amount: Number(amount),
+      received_date: date,
+      status: 'held',
+      notes,
+    })
+    await loadTxn()
+  }
+
+  async function updateTrustStatus(entryId, newStatus) {
+    const released_date = newStatus === 'released' ? new Date().toISOString().slice(0,10) : null
+    await supabase.from('trust_entries').update({ status: newStatus, released_date }).eq('id', entryId)
+    await loadTxn()
+  }
+
+  async function deleteTrustEntry(entryId) {
+    if (!window.confirm('Delete this trust entry?')) return
+    await supabase.from('trust_entries').delete().eq('id', entryId)
+    await loadTxn()
+  }
+
   if(loading) return <div className="loading"><div className="spinner"/>Loading…</div>
 
   const isClosed=txn.status==='closed', isCancelled=txn.status==='cancelled', canEdit=(!isClosed&&!isCancelled)||isBroker
@@ -277,8 +311,15 @@ export default function TransactionDetail() {
       {isCancelled&&<div className="alert-bar danger">✕ Cancelled{txn.cancelled_reason?` — ${txn.cancelled_reason}`:''}</div>}
 
       <div className="tab-bar">
-        {['deal','agents','parties',...(!isNew?['commission']:[])] .map(t=>(
-          <div key={t} className={`tab${tab===t?' active':''}`} onClick={()=>setTab(t)} style={{textTransform:'capitalize'}}>{t}</div>
+        {['deal','agents','parties',...(!isNew?['commission','trust']:[])] .map(t=>(
+          <div key={t} className={`tab${tab===t?' active':''}`} onClick={()=>setTab(t)} style={{textTransform:'capitalize',position:'relative'}}>
+            {t}
+            {t==='trust'&&trustEntries.filter(e=>e.status==='held').length>0&&(
+              <span style={{position:'absolute',top:-2,right:-6,background:'var(--amber)',color:'#fff',borderRadius:'50%',width:14,height:14,fontSize:9,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:700}}>
+                {trustEntries.filter(e=>e.status==='held').length}
+              </span>
+            )}
+          </div>
         ))}
       </div>
 
@@ -541,6 +582,64 @@ export default function TransactionDetail() {
           </table></div>
         </div>}
       </div>}
+
+      {/* TRUST TAB */}
+      {tab==='trust'&&!isNew&&<div>
+        <div className="card">
+          <div className="card-hdr">
+            <span className="card-title">Escrow / Trust Entries</span>
+            <div style={{display:'flex',gap:8,alignItems:'center'}}>
+              <span style={{fontSize:12,color:'var(--txt3)'}}>
+                Held: <strong style={{color:'var(--amber)'}}>{fmt$(trustEntries.filter(e=>e.status==='held').reduce((s,e)=>s+(e.amount||0),0))}</strong>
+              </span>
+              <button className="btn btn-gold btn-sm" onClick={addTrustEntry}>+ Add Entry</button>
+            </div>
+          </div>
+          {trustEntries.length===0?(
+            <div style={{padding:24,textAlign:'center',color:'var(--txt3)'}}>No trust entries yet. Click "+ Add Entry" to record received funds.</div>
+          ):(
+            <div className="tbl-wrap">
+              <table>
+                <thead><tr><th>Type</th><th>Amount</th><th>Received</th><th>Status</th><th>Released</th><th>Notes</th><th></th></tr></thead>
+                <tbody>
+                  {trustEntries.map(e=>(
+                    <tr key={e.id}>
+                      <td style={{fontWeight:600}}>{e.type}</td>
+                      <td style={{fontWeight:700,color:'var(--teal)'}}>{fmt$(e.amount)}</td>
+                      <td>{e.received_date||'—'}</td>
+                      <td>
+                        <span className={`badge ${e.status==='held'?'badge-amber':e.status==='released'?'badge-green':'badge-red'}`}>
+                          {e.status?.charAt(0).toUpperCase()+e.status?.slice(1)}
+                        </span>
+                      </td>
+                      <td style={{color:'var(--txt3)'}}>{e.released_date||'—'}</td>
+                      <td style={{fontSize:11,color:'var(--txt3)'}}>{e.notes||'—'}</td>
+                      <td>
+                        <div style={{display:'flex',gap:4}}>
+                          {e.status==='held'&&<>
+                            <button className="btn btn-teal btn-sm" onClick={()=>updateTrustStatus(e.id,'released')}>Release</button>
+                            <button className="btn btn-ghost btn-sm" style={{color:'var(--red)'}} onClick={()=>updateTrustStatus(e.id,'forfeited')}>Forfeit</button>
+                          </>}
+                          {e.status!=='held'&&<button className="btn btn-ghost btn-sm" onClick={()=>updateTrustStatus(e.id,'held')}>↩ Re-Hold</button>}
+                          <button className="btn btn-ghost btn-sm" style={{color:'var(--red)'}} onClick={()=>deleteTrustEntry(e.id)}>✕</button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          {trustEntries.length>0&&(
+            <div style={{padding:'12px 16px',borderTop:'1px solid var(--bdr)',display:'flex',gap:24}}>
+              <div style={{fontSize:12}}><span style={{color:'var(--txt3)'}}>Total Received: </span><strong>{fmt$(trustEntries.reduce((s,e)=>s+(e.amount||0),0))}</strong></div>
+              <div style={{fontSize:12}}><span style={{color:'var(--txt3)'}}>Currently Held: </span><strong style={{color:'var(--amber)'}}>{fmt$(trustEntries.filter(e=>e.status==='held').reduce((s,e)=>s+(e.amount||0),0))}</strong></div>
+              <div style={{fontSize:12}}><span style={{color:'var(--txt3)'}}>Released: </span><strong style={{color:'var(--green)'}}>{fmt$(trustEntries.filter(e=>e.status==='released').reduce((s,e)=>s+(e.amount||0),0))}</strong></div>
+            </div>
+          )}
+        </div>
+      </div>}
+
     </div>
   )
 }
