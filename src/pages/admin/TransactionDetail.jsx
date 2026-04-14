@@ -127,6 +127,72 @@ export default function TransactionDetail() {
   const combinedDisb=disbs.find(d=>d.agent_id===null)
   const indivDisbs=disbs.filter(d=>d.agent_id!==null)
 
+
+  function printDisbursement(agentId) {
+    const isDraft = !isClosed
+    const agentsToShow = agentId ? tas.filter(t=>t.agent_id===agentId) : tas
+    if(agentsToShow.length===0){alert('No agents on this transaction');return}
+
+    function fp(n){ return '$'+Number(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) }
+
+    let lines = ''
+    agentsToShow.forEach(ta => {
+      const plan = getPlan(ta)
+      const comm = calcCommission(txn, ta, plan, ytdMap[ta.agent_id]||0)
+      const ao = agents.find(a=>a.id===ta.agent_id)||ta.agents
+      const vol = (Number(txn.sale_price)||0)*((Number(ta.volume_pct)||0)/100)
+      const agentName = (ao?.first_name||'') + ' ' + (ao?.last_name||'')
+      const adminRow = comm.admin_fee > 0
+        ? '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;">Admin Fee (' + comm.admin_fee_payer + ' pays)</td><td style="padding:7px 0;border-bottom:1px solid #eee;color:#888;text-align:right;">' + (comm.admin_fee_payer==='agent'?'-':'+') + fp(comm.admin_fee) + '</td></tr>'
+        : ''
+      lines += '<div style="margin-bottom:32px;border:1px solid #ddd;border-radius:8px;overflow:hidden;">'
+      lines += '<div style="background:#0f2744;color:#fff;padding:10px 16px;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;">Commission Statement — ' + agentName + '</div>'
+      lines += '<div style="padding:16px;"><table style="width:100%;border-collapse:collapse;">'
+      lines += '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;width:55%;">Sale Price</td><td style="padding:7px 0;border-bottom:1px solid #eee;font-weight:600;text-align:right;">' + fp(txn.sale_price) + '</td></tr>'
+      lines += '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;">Commission Rate</td><td style="padding:7px 0;border-bottom:1px solid #eee;text-align:right;">' + txn.selling_commission_pct + '%</td></tr>'
+      lines += '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;">Gross Commission (this split)</td><td style="padding:7px 0;border-bottom:1px solid #eee;font-weight:600;text-align:right;">' + fp(comm.gross) + '</td></tr>'
+      lines += '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;">Agent Split (' + comm.pct + '%)</td><td style="padding:7px 0;border-bottom:1px solid #eee;text-align:right;">' + fp(comm.agent_gross) + '</td></tr>'
+      lines += adminRow
+      lines += '<tr><td style="padding:10px 0;border-bottom:2px solid #0f2744;font-weight:700;font-size:15px;">Net to Agent</td><td style="padding:10px 0;border-bottom:2px solid #0f2744;font-weight:800;font-size:18px;color:#1a7a6e;text-align:right;">' + fp(comm.agent_net) + '</td></tr>'
+      lines += '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;">Brokerage Retention</td><td style="padding:7px 0;font-weight:600;text-align:right;">' + fp(comm.broker_net) + '</td></tr>'
+      lines += '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;">Volume Credit (cap)</td><td style="padding:7px 0;text-align:right;">' + fp(vol) + '</td></tr>'
+      lines += '<tr><td style="padding:7px 0;color:#666;">Commission Plan</td><td style="padding:7px 0;text-align:right;">' + (plan?.name||'—') + '</td></tr>'
+      lines += '</table></div>'
+      lines += '<div style="padding:14px 16px;background:#f8f8f8;border-top:1px solid #eee;">'
+      lines += '<div style="display:flex;justify-content:space-between;">'
+      lines += '<div><div style="font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.06em;">Agent Approval</div><div style="border-bottom:1px solid #333;width:200px;margin-top:20px;"></div><div style="font-size:11px;color:#666;margin-top:4px;">' + agentName + ' &nbsp;·&nbsp; Date</div></div>'
+      lines += '<div><div style="font-size:10px;color:#999;text-transform:uppercase;letter-spacing:.06em;">Broker Approval</div><div style="border-bottom:1px solid #333;width:200px;margin-top:20px;"></div><div style="font-size:11px;color:#666;margin-top:4px;">Jewell Real Estate &nbsp;·&nbsp; Date</div></div>'
+      lines += '</div></div></div>'
+    })
+
+    const draftBanner = isDraft
+      ? '<div style="text-align:center;background:#fef3c7;border:2px solid #fbbf24;padding:10px;border-radius:6px;font-weight:700;color:#b45309;margin-bottom:20px;font-size:16px;letter-spacing:.1em;">⚠ DRAFT — NOT YET CLOSED</div>'
+      : ''
+    const status = isDraft ? 'DRAFT' : 'FINAL'
+    const closeInfo = txn.close_date || txn.estimated_close_date || 'TBD'
+    const mlsRow = txn.mls_number ? '<div style="font-size:11px;color:#999;">MLS # ' + txn.mls_number + '</div>' : ''
+
+    const html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Commission Disbursement</title>'
+      + '<style>body{font-family:Segoe UI,system-ui,sans-serif;font-size:13px;color:#1a1a1a;margin:0;padding:0;}@media print{.no-print{display:none!important;}}</style>'
+      + '</head><body style="padding:32px;max-width:800px;margin:0 auto;">'
+      + draftBanner
+      + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;padding-bottom:16px;border-bottom:3px solid #0f2744;">'
+      + '<div><div style="font-size:24px;font-weight:800;color:#0f2744;">Jewell Real Estate</div><div style="font-size:12px;color:#888;margin-top:2px;">Commission Disbursement Statement</div></div>'
+      + '<div style="text-align:right;"><div style="font-size:11px;color:#888;">' + status + ' · ' + new Date().toLocaleDateString() + '</div>'
+      + '<div style="font-size:13px;font-weight:700;margin-top:4px;">' + (txn.street_address||'') + '</div>'
+      + '<div style="font-size:12px;color:#666;">' + (txn.city||'') + ', ' + (txn.state||'') + ' ' + (txn.zip||'') + '</div>'
+      + '<div style="font-size:12px;color:#666;">Close: ' + closeInfo + '</div>'
+      + mlsRow + '</div></div>'
+      + lines
+      + '<div class="no-print" style="text-align:center;margin-top:20px;">'
+      + '<button onclick="window.print()" style="background:#0f2744;color:#fff;border:none;padding:10px 24px;border-radius:6px;font-size:14px;cursor:pointer;">⎙ Print / Save as PDF</button>'
+      + '</div></body></html>'
+
+    const w = window.open('', '_blank')
+    w.document.write(html)
+    w.document.close()
+  }
+
   return (
     <div>
       <div className="back-btn" onClick={()=>navigate('/transactions')}>← Back to Transactions</div>
@@ -142,7 +208,10 @@ export default function TransactionDetail() {
             <button className="btn btn-teal" onClick={closeTransaction}>✓ Close Transaction</button>
             <button className="btn btn-ghost" style={{color:'var(--red)'}} onClick={()=>{const r=window.prompt('Cancellation reason:');if(r)supabase.from('transactions').update({status:'cancelled',cancelled_reason:r}).eq('id',id).then(loadTxn)}}>✕ Cancel</button>
           </>}
+          <>
+          {!isNew&&tas.length>0&&<button className="btn btn-ghost" onClick={()=>printDisbursement(null)}>⎙ Print Commission</button>}
           <button className="btn btn-gold" onClick={save} disabled={saving}>{saving?'Saving…':isNew?'Create Transaction':'Save Changes'}</button>
+        </>
         </div>
       </div>
 
@@ -150,7 +219,7 @@ export default function TransactionDetail() {
       {isCancelled&&<div className="alert-bar danger">✕ Cancelled{txn.cancelled_reason?` — ${txn.cancelled_reason}`:''}</div>}
 
       <div className="tab-bar">
-        {['deal','agents','parties',...(isClosed?['disbursement']:[])] .map(t=>(
+        {['deal','agents','parties',...(!isNew?['commission']:[])] .map(t=>(
           <div key={t} className={`tab${tab===t?' active':''}`} onClick={()=>setTab(t)} style={{textTransform:'capitalize'}}>{t}</div>
         ))}
       </div>
@@ -295,6 +364,66 @@ export default function TransactionDetail() {
             </div>
           </div>
         ))}
+      </div>}
+
+      {/* COMMISSION TAB — always visible */}
+      {tab==='commission'&&!isNew&&<div>
+        <div className="card" style={{marginBottom:18}}>
+          <div className="card-hdr">
+            <span className="card-title">{isClosed ? 'Final Commission Breakdown' : 'Live Commission Preview'}</span>
+            <div style={{display:'flex',gap:8}}>
+              {!isClosed&&<span className="badge badge-amber">Draft — not yet closed</span>}
+              {tas.length>0&&<button className="btn btn-ghost btn-sm" onClick={()=>printDisbursement(null)}>⎙ Print All</button>}
+            </div>
+          </div>
+          <div className="tbl-wrap">
+            <table>
+              <thead><tr><th>Agent</th><th>Split</th><th>Plan</th><th>Agent Net</th><th>Broker Net</th><th>Volume Credit</th><th></th></tr></thead>
+              <tbody>
+                {tas.map((ta,i)=>{
+                  const plan=getPlan(ta); const comm=calcCommission(txn,ta,plan,ytdMap[ta.agent_id]||0)
+                  const ao=agents.find(a=>a.id===ta.agent_id)||ta.agents
+                  const vol=(Number(txn.sale_price)||0)*((Number(ta.volume_pct)||0)/100)
+                  return <tr key={i}>
+                    <td style={{fontWeight:600}}>{ao?.first_name} {ao?.last_name}</td>
+                    <td>{ta.split_type==='percent'?`${ta.split_value}%`:fmt$(ta.split_value)}</td>
+                    <td style={{fontSize:11}}>{plan?.name||'—'}</td>
+                    <td style={{color:'var(--teal)',fontWeight:700}}>{fmt$(comm.agent_net)}</td>
+                    <td>{fmt$(comm.broker_net)}</td>
+                    <td>{fmt$(vol)}</td>
+                    <td><button className="btn btn-ghost btn-sm" onClick={()=>printDisbursement(ta.agent_id)}>⎙ Print</button></td>
+                  </tr>
+                })}
+                <tr style={{background:'var(--surf)',fontWeight:700}}>
+                  <td colSpan={3} style={{textAlign:'right'}}>Totals</td>
+                  <td style={{color:'var(--teal)'}}>{fmt$(tas.reduce((s,ta)=>{const c=calcCommission(txn,ta,getPlan(ta),ytdMap[ta.agent_id]||0);return s+c.agent_net},0))}</td>
+                  <td>{fmt$(tas.reduce((s,ta)=>{const c=calcCommission(txn,ta,getPlan(ta),ytdMap[ta.agent_id]||0);return s+c.broker_net},0))}</td>
+                  <td colSpan={2}></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        {isClosed&&combinedDisb&&<div className="card" style={{marginBottom:18}}>
+          <div className="card-hdr">
+            <span className="card-title">Disbursement Status</span>
+            {combinedDisb.paid?<span className="badge badge-green">All Paid</span>:<button className="btn btn-teal btn-sm" onClick={()=>markPaid(combinedDisb.id)}>✓ Mark All Paid</button>}
+          </div>
+          <div className="tbl-wrap"><table>
+            <thead><tr><th>Agent</th><th>Agent Net</th><th>Status</th><th>Individual Disb</th></tr></thead>
+            <tbody>{tas.map((ta,i)=>{
+              const plan=getPlan(ta); const comm=calcCommission(txn,ta,plan,ytdMap[ta.agent_id]||0)
+              const ao=agents.find(a=>a.id===ta.agent_id)||ta.agents
+              const indiv=disbs.find(d=>d.agent_id===ta.agent_id)
+              return <tr key={i}>
+                <td style={{fontWeight:600}}>{ao?.first_name} {ao?.last_name}</td>
+                <td style={{color:'var(--teal)',fontWeight:700}}>{fmt$(comm.agent_net)}</td>
+                <td>{indiv?<span className={`badge ${indiv.paid?'badge-green':'badge-amber'}`}>{indiv.paid?'Paid':'Pending'}</span>:'—'}</td>
+                <td>{indiv?<button className="btn btn-ghost btn-sm" onClick={()=>printDisbursement(ta.agent_id)}>⎙ Print Individual</button>:<button className="btn btn-ghost btn-sm" onClick={()=>genIndivDisb(ta.agent_id)}>Generate</button>}</td>
+              </tr>
+            })}</tbody>
+          </table></div>
+        </div>}
       </div>}
 
       {/* DISBURSEMENT TAB */}
