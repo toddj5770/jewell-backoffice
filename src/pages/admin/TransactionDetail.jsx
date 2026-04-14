@@ -74,7 +74,29 @@ export default function TransactionDetail() {
   function addTA() {
     setTas(rows=>[...rows,{_new:true,agent_id:'',split_type:'percent',split_value:rows.length===0?100:0,volume_pct:rows.length===0?100:0,plan_id:null,sort_order:rows.length}])
   }
-  function updTA(i,c) { setTas(rows=>rows.map((r,j)=>j===i?{...r,...c}:r)) }
+  function updTA(i, c) {
+    setTas(rows => {
+      const updated = rows.map((r, j) => j === i ? {...r, ...c} : r)
+      // Auto-balance percent splits when there are exactly 2 agents
+      if (
+        'split_value' in c &&
+        updated.length === 2 &&
+        updated[0].split_type === 'percent' &&
+        updated[1].split_type === 'percent'
+      ) {
+        const changedVal = Number(c.split_value) || 0
+        const otherIdx = i === 0 ? 1 : 0
+        const otherVal = Math.max(0, Math.min(100, 100 - changedVal))
+        updated[otherIdx] = {...updated[otherIdx], split_value: otherVal}
+        // Also auto-balance volume_pct if it matches the old split
+        if (!('volume_pct' in c)) {
+          updated[i] = {...updated[i], volume_pct: changedVal}
+          updated[otherIdx] = {...updated[otherIdx], volume_pct: otherVal}
+        }
+      }
+      return updated
+    })
+  }
   function delTA(i) { setTas(rows=>rows.filter((_,j)=>j!==i)) }
   function addParty(side) { f(side,[...(txn[side]||[]),{name:'',phone:'',email:''}]) }
   function updParty(side,i,k,v) { const l=[...(txn[side]||[])]; l[i]={...l[i],[k]:v}; f(side,l) }
