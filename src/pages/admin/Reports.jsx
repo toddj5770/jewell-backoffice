@@ -25,6 +25,7 @@ const FIELDS = {
     { key: 'mls_number',              label: 'MLS #',             type: 'text' },
     { key: 'mortgage_company',        label: 'Mortgage Co.',      type: 'text' },
     { key: 'agent_names',             label: 'Agent(s)',          type: 'text', computed: true },
+    { key: 'primary_agent',           label: 'Primary Agent',     type: 'text', computed: true },
     { key: 'agent_split_pct',         label: 'Agent Split %',     type: 'number', computed: true },
     { key: 'volume_credit',           label: 'Volume Credit',     type: 'number', fmt: 'currency', computed: true },
     { key: 'admin_fee_payer',         label: 'Admin Fee Payer',   type: 'text' },
@@ -93,6 +94,7 @@ const BUILTIN_REPORTS = [
   { id: 'office_pipeline',     name: 'Office Pipeline',            icon: '🔄', desc: 'All open deals with full commission breakdown' },
   { id: 'projected_by_month',  name: 'Projected Income by Month',  icon: '📅', desc: 'Anticipated income grouped by estimated close month' },
   { id: 'trust_ledger',        name: 'Trust / Escrow Ledger',      icon: '🏦', desc: 'All escrow money held, released, and forfeited by transaction' },
+  { id: 'agent_pipeline',      name: 'Agent Pipeline & Income',    icon: '👤📊', desc: 'Full pipeline and income report for a specific agent — open deals, closed income, cap progress' },
 ]
 
 function getDatePreset(preset) {
@@ -212,6 +214,8 @@ export default function Reports() {
     dateFrom: new Date().getFullYear() + '-01-01',
     dateTo: new Date().toISOString().slice(0, 10),
     preset: 'ytd',
+    agentId: '',
+    includeCoAgent: true,
   })
 
   function applyPreset(preset) {
@@ -561,6 +565,104 @@ export default function Reports() {
         rows.push(['','TOTALS ('+open.length+' deals)','','',fmt$(open.reduce((s,t)=>s+(t.sale_price||0),0)),fmt$(open.reduce((s,t)=>s+t.gross_commission,0)),'',fmt$(open.reduce((s,t)=>s+t.agent_net,0)),fmt$(open.reduce((s,t)=>s+t.admin_fee_collected,0)),fmt$(open.reduce((s,t)=>s+t.office_split,0)),fmt$(open.reduce((s,t)=>s+t.total_office_income,0)),''])
         break
       }
+      case 'agent_pipeline': {
+        const aid = builtinFilters.agentId
+        const inclCo = builtinFilters.includeCoAgent
+        const df = builtinFilters.dateFrom, dt = builtinFilters.dateTo
+
+        // Get all transactions where this agent appears (primary or co-agent)
+        const agentTxns = transactions.filter(t => {
+          const tas = t.transaction_agents || []
+          if (!aid) return true // all agents
+          return tas.some((ta, idx) => {
+            if (ta.agent_id !== aid) return false
+            if (idx === 0) return true // primary — always include
+            return inclCo // co-agent — only if checkbox checked
+          })
+        })
+
+        const closedInRange = agentTxns.filter(t => t.status === 'closed' && t.close_date >= df && t.close_date <= dt)
+        const openDeals = agentTxns.filter(t => t.status === 'active' || t.status === 'pending')
+
+        // Section 1: Closed income summary
+        columns = ['Section','Address','City','Role','Close Date','Sale Price','Gross Comm','Agent Split %','Agent Net','Admin Fee','Office Net','Lead Source']
+
+        closedInRange.forEach(t => {
+          ;(t.transaction_agents || []).forEach((ta, idx) => {
+            if (aid && ta.agent_id !== aid) return
+            const plan = ta.plans
+            const agentPct = plan?.type === 'cap' ? (plan.cap_levels?.[0]?.pct || 90) : (plan?.agent_pct || 80)
+            const split = ta.split_type === 'dollar' ? ta.split_value : t.gross_commission * ((ta.split_value || 100) / 100)
+            const feeAmt = idx === 0 ? (plan?.fees?.find(f=>f.name==='Admin Fee')?.amt || 0) : 0
+            const payer = t.admin_fee_payer || 'client'
+            let aN = split * (agentPct / 100)
+            let oN = split * ((100 - agentPct) / 100)
+            if (payer === 'agent') aN -= feeAmt
+            else if (payer === 'broker') oN -= feeAmt
+            const offAdmin = (payer === 'client' || payer === 'agent') ? feeAmt : 0
+            const role = idx === 0 ? 'Primary' : 'Co-Agent'
+            rows.push(['CLOSED', t.street_address + ', ' + t.city, t.city, role, t.close_date || '—', fmt$(t.sale_price), fmt$(t.gross_commission), agentPct + '%', fmt$(aN), fmt$(offAdmin), fmt$(oN + offAdmin), t.lead_source || '—'])
+          })
+        })
+
+        // Closed totals
+        if (closedInRange.length > 0) {
+          const totGross = closedInRange.reduce((s,t) => s + t.gross_commission, 0)
+          const totAgent = closedInRange.reduce((s,t) => {
+            return s + (t.transaction_agents||[]).filter(ta=>!aid||ta.agent_id===aid).reduce((ss,ta,idx) => {
+              const plan=ta.plans; const agentPct=plan?.type==='cap'?(plan.cap_levels?.[0]?.pct||90):(plan?.agent_pct||80)
+              const split=ta.split_type==='dollar'?ta.split_value:t.gross_commission*((ta.split_value||100)/100)
+              const feeAmt=idx===0?(plan?.fees?.find(f=>f.name==='Admin Fee')?.amt||0):0
+              let aN=split*(agentPct/100); if(t.admin_fee_payer==='agent') aN-=feeAmt
+              return ss+aN
+            }, 0)
+          }, 0)
+          rows.push(['CLOSED TOTALS', closedInRange.length + ' deals', '', '', '', fmt$(closedInRange.reduce((s,t)=>s+(t.sale_price||0),0)), fmt$(totGross), '', fmt$(totAgent), '', '', ''])
+          rows.push(['', '', '', '', '', '', '', '', '', '', '', ''])
+        }
+
+        // Section 2: Open pipeline
+        openDeals.forEach(t => {
+          ;(t.transaction_agents || []).forEach((ta, idx) => {
+            if (aid && ta.agent_id !== aid) return
+            const plan = ta.plans
+            const agentPct = plan?.type === 'cap' ? (plan.cap_levels?.[0]?.pct || 90) : (plan?.agent_pct || 80)
+            const split = ta.split_type === 'dollar' ? ta.split_value : t.gross_commission * ((ta.split_value || 100) / 100)
+            const feeAmt = idx === 0 ? (plan?.fees?.find(f=>f.name==='Admin Fee')?.amt || 0) : 0
+            const payer = t.admin_fee_payer || 'client'
+            let aN = split * (agentPct / 100)
+            let oN = split * ((100 - agentPct) / 100)
+            if (payer === 'agent') aN -= feeAmt
+            const role = idx === 0 ? 'Primary' : 'Co-Agent'
+            rows.push(['PIPELINE (' + t.status + ')', t.street_address + ', ' + t.city, t.city, role, t.estimated_close_date || 'TBD', fmt$(t.sale_price), fmt$(t.gross_commission), agentPct + '%', fmt$(aN), fmt$(feeAmt), fmt$(oN), t.lead_source || '—'])
+          })
+        })
+
+        if (openDeals.length > 0) {
+          const totOpen = openDeals.reduce((s,t) => s + t.gross_commission, 0)
+          rows.push(['PIPELINE TOTALS', openDeals.length + ' deals', '', '', '', fmt$(openDeals.reduce((s,t)=>s+(t.sale_price||0),0)), fmt$(totOpen), '', '', '', '', ''])
+        }
+
+        // Cap progress section
+        if (aid && allData) {
+          const agentObj = allData.rawAgents.find(a => a.id === aid)
+          const plan = agentObj?.plans
+          if (plan?.type === 'cap') {
+            const thisYear = new Date().getFullYear()
+            const brokerPaid = transactions
+              .filter(t => t.status === 'closed' && t.close_date && new Date(t.close_date).getFullYear() === thisYear)
+              .flatMap(t => (t.transaction_agents||[]).filter(ta=>ta.agent_id===aid))
+              .reduce((s,ta) => s + (ta.locked_broker_net||0), 0)
+            const cap = plan.cap_amount || 0
+            const remaining = Math.max(0, cap - brokerPaid)
+            rows.push(['', '', '', '', '', '', '', '', '', '', '', ''])
+            rows.push(['CAP PROGRESS', plan.name, '', '', '', '', fmt$(cap) + ' cap', '', fmt$(Math.min(brokerPaid, cap)) + ' paid', '', fmt$(remaining) + ' remaining', brokerPaid >= cap ? '🎯 CAPPED' : Math.round(brokerPaid/cap*100) + '% to cap'])
+          }
+        }
+
+        break
+      }
+
       case 'trust_ledger': {
         columns = ['Transaction', 'City', 'Type', 'Amount', 'Received', 'Status', 'Released', 'Notes']
         const trust = allData.trustEntries || []
@@ -650,7 +752,7 @@ export default function Reports() {
           <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
             {isBuiltin && (
               <>
-                {!['pending_income','office_pipeline','projected_by_month','trust_ledger'].includes(activeReport.id) && <>
+                {!['pending_income','office_pipeline','projected_by_month','trust_ledger','agent_pipeline'].includes(activeReport.id) && <>
                   <select className="form-ctrl" value={builtinFilters.preset} onChange={e=>applyPreset(e.target.value)} style={{width:160}}>
                     {DATE_PRESETS.map(p=><option key={p.value} value={p.value}>{p.label}</option>)}
                   </select>
@@ -668,6 +770,24 @@ export default function Reports() {
                     <input className="form-ctrl" type="date" value={builtinFilters.dateFrom} onChange={e=>setBuiltinFilters(f=>({...f,dateFrom:e.target.value,preset:'custom'}))} style={{width:140}}/>
                     <span style={{color:'rgba(255,255,255,.5)',fontSize:12}}>→</span>
                     <input className="form-ctrl" type="date" value={builtinFilters.dateTo} onChange={e=>setBuiltinFilters(f=>({...f,dateTo:e.target.value,preset:'custom'}))} style={{width:140}}/>
+                  </>}
+                </>}
+                {activeReport.id === 'agent_pipeline' && <>
+                  <select className="form-ctrl" value={builtinFilters.agentId} onChange={e=>setBuiltinFilters(f=>({...f,agentId:e.target.value}))} style={{width:180}}>
+                    <option value="">— All Agents —</option>
+                    {(allData?.rawAgents||[]).filter(a=>a.status==='active').sort((a,b)=>a.last_name.localeCompare(b.last_name)).map(a=><option key={a.id} value={a.id}>{a.first_name} {a.last_name}</option>)}
+                  </select>
+                  <label style={{display:'flex',alignItems:'center',gap:6,color:'rgba(255,255,255,.7)',fontSize:12,cursor:'pointer'}}>
+                    <input type="checkbox" checked={builtinFilters.includeCoAgent} onChange={e=>setBuiltinFilters(f=>({...f,includeCoAgent:e.target.checked}))}/>
+                    Include as Co-Agent
+                  </label>
+                  <select className="form-ctrl" value={builtinFilters.preset} onChange={e=>applyPreset(e.target.value)} style={{width:160}}>
+                    {DATE_PRESETS.map(p=><option key={p.value} value={p.value}>{p.label}</option>)}
+                  </select>
+                  {<>
+                    <input className="form-ctrl" type="date" value={builtinFilters.dateFrom} onChange={e=>setBuiltinFilters(f=>({...f,dateFrom:e.target.value,preset:'custom'}))} style={{width:130}}/>
+                    <span style={{color:'rgba(255,255,255,.5)',fontSize:12}}>→</span>
+                    <input className="form-ctrl" type="date" value={builtinFilters.dateTo} onChange={e=>setBuiltinFilters(f=>({...f,dateTo:e.target.value,preset:'custom'}))} style={{width:130}}/>
                   </>}
                 </>}
                 <button className="btn btn-navy btn-sm" onClick={()=>runBuiltinReport(activeReport.id)}>↻ Run</button>
