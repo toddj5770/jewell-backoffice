@@ -651,9 +651,44 @@ export default function Reports() {
         })
 
         if (openDeals.length > 0) {
-          const totOpen = openDeals.reduce((s,t) => s + t.gross_commission, 0)
-          rows.push(['PIPELINE TOTALS', openDeals.length + ' deals', '', '', '', fmt$(openDeals.reduce((s,t)=>s+(t.sale_price||0),0)), fmt$(totOpen), '', '', '', '', ''])
+          const totOpenVolume = openDeals.reduce((s,t) => s + (t.sale_price||0), 0)
+          const totOpenGross = openDeals.reduce((s,t) => s + t.gross_commission, 0)
+          const totOpenAgent = openDeals.reduce((s,t) => {
+            return s + (t.transaction_agents||[]).filter(ta=>!aid||ta.agent_id===aid).reduce((ss,ta,idx) => {
+              const plan=ta.plans; const agentPct=plan?.type==='cap'?(plan.cap_levels?.[0]?.pct||90):(plan?.agent_pct||80)
+              const split=ta.split_type==='dollar'?ta.split_value:t.gross_commission*((ta.split_value||100)/100)
+              const feeAmt=idx===0?(plan?.fees?.find(f=>f.name==='Admin Fee')?.amt||0):0
+              let aN=split*(agentPct/100); if(t.admin_fee_payer==='agent') aN-=feeAmt
+              return ss+aN
+            }, 0)
+          }, 0)
+          rows.push(['PIPELINE TOTALS', openDeals.length + ' deals', '', '', '', fmt$(totOpenVolume), fmt$(totOpenGross), '', fmt$(totOpenAgent), '', '', ''])
         }
+
+        // Grand total (closed + pipeline)
+        const allRows = rows.filter(r => r[0].startsWith('CLOSED') || r[0].startsWith('PIPELINE'))
+        const closedAgentTotal = closedInRange.reduce((s,t) => {
+          return s + (t.transaction_agents||[]).filter(ta=>!aid||ta.agent_id===aid).reduce((ss,ta,idx) => {
+            const plan=ta.plans; const agentPct=plan?.type==='cap'?(plan.cap_levels?.[0]?.pct||90):(plan?.agent_pct||80)
+            const split=ta.split_type==='dollar'?ta.split_value:t.gross_commission*((ta.split_value||100)/100)
+            const feeAmt=idx===0?(plan?.fees?.find(f=>f.name==='Admin Fee')?.amt||0):0
+            let aN=split*(agentPct/100); if(t.admin_fee_payer==='agent') aN-=feeAmt
+            return ss+aN
+          }, 0)
+        }, 0)
+        const pipelineAgentTotal = openDeals.reduce((s,t) => {
+          return s + (t.transaction_agents||[]).filter(ta=>!aid||ta.agent_id===aid).reduce((ss,ta,idx) => {
+            const plan=ta.plans; const agentPct=plan?.type==='cap'?(plan.cap_levels?.[0]?.pct||90):(plan?.agent_pct||80)
+            const split=ta.split_type==='dollar'?ta.split_value:t.gross_commission*((ta.split_value||100)/100)
+            const feeAmt=idx===0?(plan?.fees?.find(f=>f.name==='Admin Fee')?.amt||0):0
+            let aN=split*(agentPct/100); if(t.admin_fee_payer==='agent') aN-=feeAmt
+            return ss+aN
+          }, 0)
+        }, 0)
+        const grandTotalVolume = [...closedInRange,...openDeals].reduce((s,t)=>s+(t.sale_price||0),0)
+        const grandTotalGross = [...closedInRange,...openDeals].reduce((s,t)=>s+t.gross_commission,0)
+        rows.push(['', '', '', '', '', '', '', '', '', '', '', ''])
+        rows.push(['GRAND TOTAL', (closedInRange.length + openDeals.length) + ' deals', '', '', '', fmt$(grandTotalVolume), fmt$(grandTotalGross), '', fmt$(closedAgentTotal + pipelineAgentTotal), '', '', ''])
 
         // Cap progress section
         if (aid && allData) {
@@ -825,7 +860,7 @@ export default function Reports() {
                 <tbody>
                   {reportData.rows.length===0 && <tr><td colSpan={reportData.columns.length} style={{textAlign:'center',color:'var(--txt3)',padding:30}}>No data matches your criteria.</td></tr>}
                   {reportData.rows.map((row,ri)=>(
-                    <tr key={ri} style={ri===reportData.rows.length-1&&(row[0]==='TOTALS'||row[0]==='TOTAL'||row[2]==='TOTALS')?{background:'var(--gold-pale)',fontWeight:700}:{}}>
+                    <tr key={ri} style={(row[0]==='TOTALS'||row[0]==='TOTAL'||row[2]==='TOTALS'||row[0]==='CLOSED TOTALS'||row[0]==='PIPELINE TOTALS'||row[0]==='GRAND TOTAL')?{background:'var(--gold-pale)',fontWeight:700}:{}}>
                       {row.map((cell,ci)=><td key={ci}>{cell}</td>)}
                     </tr>
                   ))}
