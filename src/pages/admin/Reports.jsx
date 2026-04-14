@@ -92,6 +92,7 @@ const BUILTIN_REPORTS = [
   { id: 'pending_income',      name: 'Pending Income by Agent',    icon: '⏳', desc: 'Projected income from open deals by agent' },
   { id: 'office_pipeline',     name: 'Office Pipeline',            icon: '🔄', desc: 'All open deals with full commission breakdown' },
   { id: 'projected_by_month',  name: 'Projected Income by Month',  icon: '📅', desc: 'Anticipated income grouped by estimated close month' },
+  { id: 'trust_ledger',        name: 'Trust / Escrow Ledger',      icon: '🏦', desc: 'All escrow money held, released, and forfeited by transaction' },
 ]
 
 function getDatePreset(preset) {
@@ -232,13 +233,14 @@ export default function Reports() {
   }
 
   async function loadAllData() {
-    const [txnRes, agentRes] = await Promise.all([
+    const [txnRes, agentRes, trustRes] = await Promise.all([
       supabase.from('transactions').select('*, transaction_agents(*, agents(id,first_name,last_name,office), plans(*))'),
       supabase.from('agents').select('*, plans(*)'),
+      supabase.from('trust_entries').select('*, transactions(street_address,city,state,close_date,estimated_close_date)'),
     ])
     const txns = (txnRes.data || []).map(t => enrichTransaction(t, agentRes.data || []))
     const agts = (agentRes.data || []).map(a => enrichAgent(a, txnRes.data || []))
-    setAllData({ transactions: txns, agents: agts, rawAgents: agentRes.data || [] })
+    setAllData({ transactions: txns, agents: agts, rawAgents: agentRes.data || [], trustEntries: trustRes.data || [] })
   }
 
   function enrichTransaction(t, agentList) {
@@ -559,6 +561,35 @@ export default function Reports() {
         rows.push(['','TOTALS ('+open.length+' deals)','','',fmt$(open.reduce((s,t)=>s+(t.sale_price||0),0)),fmt$(open.reduce((s,t)=>s+t.gross_commission,0)),'',fmt$(open.reduce((s,t)=>s+t.agent_net,0)),fmt$(open.reduce((s,t)=>s+t.admin_fee_collected,0)),fmt$(open.reduce((s,t)=>s+t.office_split,0)),fmt$(open.reduce((s,t)=>s+t.total_office_income,0)),''])
         break
       }
+      case 'trust_ledger': {
+        columns = ['Transaction', 'City', 'Type', 'Amount', 'Received', 'Status', 'Released', 'Notes']
+        const trust = allData.trustEntries || []
+        const statusFilter2 = builtinFilters.preset === 'all' ? null : null // show all by default
+        trust.forEach(e => {
+          const t = e.transactions
+          rows.push([
+            t?.street_address || '—',
+            t?.city || '—',
+            e.type || '—',
+            fmt$(e.amount),
+            e.received_date || '—',
+            e.status?.charAt(0).toUpperCase() + e.status?.slice(1) || '—',
+            e.released_date || '—',
+            e.notes || '—',
+          ])
+        })
+        rows.sort((a,b) => a[5].localeCompare(b[5])) // sort by status: Forfeited, Held, Released
+        // Summary rows
+        const held = trust.filter(e=>e.status==='held').reduce((s,e)=>s+(e.amount||0),0)
+        const released = trust.filter(e=>e.status==='released').reduce((s,e)=>s+(e.amount||0),0)
+        const forfeited = trust.filter(e=>e.status==='forfeited').reduce((s,e)=>s+(e.amount||0),0)
+        rows.push(['', '', 'CURRENTLY HELD', fmt$(held), '', '', '', ''])
+        rows.push(['', '', 'RELEASED', fmt$(released), '', '', '', ''])
+        rows.push(['', '', 'FORFEITED', fmt$(forfeited), '', '', '', ''])
+        rows.push(['', '', 'TOTAL RECEIVED', fmt$(held+released+forfeited), '', '', '', ''])
+        break
+      }
+
       case 'projected_by_month': {
         columns = ['Month','Open Deals','Proj. Gross GCI','Proj. Agent Net','Admin Fees','Office Split','Total Office Income','Avg Deal Size']
         const map = {}
@@ -619,7 +650,7 @@ export default function Reports() {
           <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
             {isBuiltin && (
               <>
-                {!['pending_income','office_pipeline','projected_by_month'].includes(activeReport.id) && <>
+                {!['pending_income','office_pipeline','projected_by_month','trust_ledger'].includes(activeReport.id) && <>
                   <select className="form-ctrl" value={builtinFilters.preset} onChange={e=>applyPreset(e.target.value)} style={{width:160}}>
                     {DATE_PRESETS.map(p=><option key={p.value} value={p.value}>{p.label}</option>)}
                   </select>
@@ -627,7 +658,7 @@ export default function Reports() {
                   <span style={{color:'rgba(255,255,255,.5)',fontSize:12}}>→</span>
                   <input className="form-ctrl" type="date" value={builtinFilters.dateTo} onChange={e=>setBuiltinFilters(f=>({...f,dateTo:e.target.value,preset:'custom'}))} style={{width:140}}/>
                 </>}
-                {['pending_income','office_pipeline','projected_by_month'].includes(activeReport.id) && <>
+                {['pending_income','office_pipeline','projected_by_month','trust_ledger'].includes(activeReport.id) && <>
                   <span style={{fontSize:11,color:'rgba(255,255,255,.5)'}}>Est. Close:</span>
                   <select className="form-ctrl" value={builtinFilters.preset} onChange={e=>applyPreset(e.target.value)} style={{width:160}}>
                     <option value="all">All Open Deals</option>
