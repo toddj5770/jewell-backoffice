@@ -572,22 +572,29 @@ export default function Reports() {
 
         // Get all transactions where this agent appears (primary or co-agent)
         const agentTxns = transactions.filter(t => {
+          // Agent filter
           const tas = t.transaction_agents || []
-          if (!aid) return true // all agents
-          return tas.some((ta, idx) => {
+          const agentMatch = !aid || tas.some((ta, idx) => {
             if (ta.agent_id !== aid) return false
-            if (idx === 0) return true // primary — always include
-            return inclCo // co-agent — only if checkbox checked
+            if (idx === 0) return true
+            return inclCo
           })
+          if (!agentMatch) return false
+          // Date filter: closed deals by close_date, open deals by estimated_close_date
+          if (t.status === 'closed') {
+            const d = String(t.close_date || '').slice(0,10)
+            return d >= df.slice(0,10) && d <= dt.slice(0,10)
+          }
+          if (t.status === 'active' || t.status === 'pending') {
+            const est = String(t.estimated_close_date || '').slice(0,10)
+            if (!est || est.length < 10) return false
+            return est >= df.slice(0,10) && est <= dt.slice(0,10)
+          }
+          return false
         })
 
-        const closedInRange = agentTxns.filter(t => t.status === 'closed' && t.close_date >= df && t.close_date <= dt)
-        const openDeals = agentTxns.filter(t => {
-          if (!(t.status === 'active' || t.status === 'pending')) return false
-          const est = t.estimated_close_date
-          if (!est) return true // no date — always show
-          return est >= df && est <= dt
-        })
+        const closedInRange = agentTxns.filter(t => t.status === 'closed')
+        const openDeals = agentTxns.filter(t => t.status === 'active' || t.status === 'pending')
 
         // Section 1: Closed income summary
         columns = ['Section','Address','City','Role','Close Date','Sale Price','Gross Comm','Agent Split %','Agent Net','Admin Fee','Office Net','Lead Source']
