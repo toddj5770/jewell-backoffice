@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useAuth } from '../../hooks/useAuth'
 import { useParams, useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
 import { fmt$, fmtPct, calcCommission, statusBadge } from '../../lib/commission'
@@ -12,6 +13,8 @@ const EMPTY = {
 }
 
 export default function TransactionDetail() {
+  const { profile } = useAuth()
+  const isBroker = profile?.role === 'broker' || profile?.role === 'admin'
   const { id } = useParams()
   const navigate = useNavigate()
   const isNew = !id || id==='new'
@@ -119,9 +122,36 @@ export default function TransactionDetail() {
     await loadTxn()
   }
 
+  async function reopenTransaction(newStatus) {
+    if (!window.confirm(`Reopen this transaction as "${newStatus}"? Commission lock will be removed and the disbursement record will be deleted.`)) return
+    // Delete disbursements
+    await supabase.from('disbursements').delete().eq('transaction_id', id)
+    // Unlock commission on agent rows
+    await supabase.from('transaction_agents').update({
+      locked_gross: null, locked_agent_pct: null, locked_agent_gross: null,
+      locked_agent_net: null, locked_broker_net: null, locked_admin_fee: null, locked_admin_fee_payer: null
+    }).eq('transaction_id', id)
+    // Update transaction
+    await supabase.from('transactions').update({
+      status: newStatus, close_date: null, locked_at: null, cancelled_reason: null
+    }).eq('id', id)
+    await loadTxn()
+    setTab('deal')
+  }
+
+  async function deleteTransaction() {
+    if (!window.confirm('Permanently delete this transaction? This cannot be undone.')) return
+    if (!window.confirm('Are you absolutely sure? All disbursements and agent splits will also be deleted.')) return
+    await supabase.from('disbursements').delete().eq('transaction_id', id)
+    await supabase.from('transaction_agents').delete().eq('transaction_id', id)
+    await supabase.from('trust_entries').delete().eq('transaction_id', id)
+    await supabase.from('transactions').delete().eq('id', id)
+    navigate('/transactions')
+  }
+
   if(loading) return <div className="loading"><div className="spinner"/>Loading…</div>
 
-  const isClosed=txn.status==='closed', isCancelled=txn.status==='cancelled', canEdit=!isClosed&&!isCancelled
+  const isClosed=txn.status==='closed', isCancelled=txn.status==='cancelled', canEdit=(!isClosed&&!isCancelled)||isBroker
   const gross=(Number(txn.sale_price)||0)*((Number(txn.selling_commission_pct)||0)/100)
   const totalSplit=tas.reduce((s,t)=>s+Number(t.split_value||0),0)
   const combinedDisb=disbs.find(d=>d.agent_id===null)
@@ -208,6 +238,11 @@ export default function TransactionDetail() {
             <button className="btn btn-teal" onClick={closeTransaction}>✓ Close Transaction</button>
             <button className="btn btn-ghost" style={{color:'var(--red)'}} onClick={()=>{const r=window.prompt('Cancellation reason:');if(r)supabase.from('transactions').update({status:'cancelled',cancelled_reason:r}).eq('id',id).then(loadTxn)}}>✕ Cancel</button>
           </>}
+          {isBroker&&!isNew&&(isClosed||isCancelled)&&<>
+            <button className="btn btn-ghost" style={{color:'var(--amber)'}} onClick={()=>reopenTransaction('pending')}>↩ Reopen as Pending</button>
+            <button className="btn btn-ghost" style={{color:'var(--amber)'}} onClick={()=>reopenTransaction('active')}>↩ Reopen as Active</button>
+          </>}
+          {isBroker&&!isNew&&<button className="btn btn-ghost" style={{color:'var(--red)',borderColor:'var(--red)'}} onClick={deleteTransaction}>🗑 Delete</button>}
           <>
           {!isNew&&tas.length>0&&<button className="btn btn-ghost" onClick={()=>printDisbursement(null)}>⎙ Print Commission</button>}
           <button className="btn btn-gold" onClick={save} disabled={saving}>{saving?'Saving…':isNew?'Create Transaction':'Save Changes'}</button>
