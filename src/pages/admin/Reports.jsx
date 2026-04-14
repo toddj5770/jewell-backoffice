@@ -572,14 +572,14 @@ export default function Reports() {
 
         // Get all transactions where this agent appears (primary or co-agent)
         const agentTxns = transactions.filter(t => {
-          // Agent filter
+          // Agent filter — check if selected agent appears on this deal
           const tas = t.transaction_agents || []
-          const agentMatch = !aid || tas.some((ta, idx) => {
-            if (ta.agent_id !== aid) return false
-            if (idx === 0) return true
-            return inclCo
-          })
-          if (!agentMatch) return false
+          if (aid) {
+            const agentEntry = tas.find(ta => ta.agent_id === aid)
+            if (!agentEntry) return false
+            const isPrimary = tas.indexOf(agentEntry) === 0
+            if (!isPrimary && !inclCo) return false // co-agent but checkbox off
+          }
           // Date filter: closed deals by close_date, open deals by estimated_close_date
           if (t.status === 'closed') {
             const d = String(t.close_date || '').slice(0,10)
@@ -604,7 +604,7 @@ export default function Reports() {
           // When an agent is selected, only show that agent's row
           const tasToShow = aid ? tas.filter(ta => ta.agent_id === aid) : tas
           tasToShow.forEach((ta) => {
-            const idx = tas.indexOf(ta) // get original index for admin fee calc
+            const idx = tas.findIndex(t2 => t2 === ta || t2.agent_id === ta.agent_id) // original index for admin fee
             const plan = ta.plans
             const agentPct = plan?.type === 'cap' ? (plan.cap_levels?.[0]?.pct || 90) : (plan?.agent_pct || 80)
             const split = ta.split_type === 'dollar' ? ta.split_value : t.gross_commission * ((ta.split_value || 100) / 100)
@@ -642,7 +642,7 @@ export default function Reports() {
           // When an agent is selected, only show that agent's row
           const tasToShow = aid ? tas.filter(ta => ta.agent_id === aid) : tas
           tasToShow.forEach((ta) => {
-            const idx = tas.indexOf(ta)
+            const idx = tas.findIndex(t2 => t2 === ta || t2.agent_id === ta.agent_id)
             const plan = ta.plans
             const agentPct = plan?.type === 'cap' ? (plan.cap_levels?.[0]?.pct || 90) : (plan?.agent_pct || 80)
             const split = ta.split_type === 'dollar' ? ta.split_value : t.gross_commission * ((ta.split_value || 100) / 100)
