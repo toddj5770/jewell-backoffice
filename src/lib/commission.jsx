@@ -15,7 +15,7 @@ export function fmtPct(n) {
  * @param {object} plan - the plan record
  * @param {number} brokerPaidYTD - running broker total for this agent this year (for cap)
  */
-export function calcCommission(txn, ta, plan, brokerPaidYTD = 0) {
+export function calcCommission(txn, ta, plan, brokerPaidYTD = 0, isPrimary = true) {
   // If locked values exist (closed txn), use them directly
   if (ta?.locked_agent_net !== null && ta?.locked_agent_net !== undefined) {
     return {
@@ -53,9 +53,9 @@ export function calcCommission(txn, ta, plan, brokerPaidYTD = 0) {
     }
   }
 
-  // --- Admin fee ---
+  // --- Admin fee --- only charged once per transaction (primary agent only)
   const feeItem = (plan.fees || []).find(f => f.name === 'Admin Fee')
-  const adminFee = feeItem?.amt || 0
+  const adminFee = isPrimary ? (feeItem?.amt || 0) : 0
   const adminFeePayer = ta?.locked_admin_fee_payer || txn.admin_fee_payer || feeItem?.payer || 'client'
 
   // --- Determine agent split % ---
