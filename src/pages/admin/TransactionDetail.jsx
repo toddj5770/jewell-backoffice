@@ -125,7 +125,7 @@ export default function TransactionDetail() {
     if(!cd)return
     for(const ta of tas) {
       const plan=getPlan(ta); const ytd=ytdMap[ta.agent_id]||0
-      const c=calcCommission(txn,ta,plan,ytd)
+      const c=calcCommission(txn,ta,plan,ytd,tas.indexOf(ta)===0)
       await supabase.from('transaction_agents').update({locked_gross:c.gross,locked_agent_pct:c.pct,locked_agent_gross:c.agent_gross,locked_agent_net:c.agent_net,locked_broker_net:c.broker_net,locked_admin_fee:c.admin_fee,locked_admin_fee_payer:c.admin_fee_payer}).eq('id',ta.id)
     }
     await supabase.from('transactions').update({status:'closed',close_date:cd,locked_at:new Date().toISOString()}).eq('id',id)
@@ -332,7 +332,7 @@ export default function TransactionDetail() {
             {tas.length===0&&<div style={{padding:30,textAlign:'center',color:'var(--txt3)'}}>No agents. <button className="btn btn-ghost btn-sm" onClick={addTA}>Add Agent</button></div>}
             {tas.map((ta,i)=>{
               const plan=getPlan(ta); const ytd=ytdMap[ta.agent_id]||0
-              const comm=ta.agent_id?calcCommission(txn,ta,plan,ytd):null
+              const comm=ta.agent_id?calcCommission(txn,ta,plan,ytd,i===0):null
               return <div key={i} style={{padding:'18px 20px',borderBottom:'1px solid var(--bdr)'}}>
                 <div style={{display:'flex',justifyContent:'space-between',marginBottom:12}}>
                   <span style={{fontWeight:700,color:'var(--navy)'}}>{i===0?'Primary Agent':`Co-Agent ${i+1}`}</span>
@@ -438,7 +438,7 @@ export default function TransactionDetail() {
               <thead><tr><th>Agent</th><th>Split</th><th>Plan</th><th>Agent Net</th><th>Broker Net</th><th>Volume Credit</th><th></th></tr></thead>
               <tbody>
                 {tas.map((ta,i)=>{
-                  const plan=getPlan(ta); const comm=calcCommission(txn,ta,plan,ytdMap[ta.agent_id]||0)
+                  const plan=getPlan(ta); const comm=calcCommission(txn,ta,plan,ytdMap[ta.agent_id]||0,i===0)
                   const ao=agents.find(a=>a.id===ta.agent_id)||ta.agents
                   const vol=(Number(txn.sale_price)||0)*((Number(ta.volume_pct)||0)/100)
                   return <tr key={i}>
@@ -453,8 +453,8 @@ export default function TransactionDetail() {
                 })}
                 <tr style={{background:'var(--surf)',fontWeight:700}}>
                   <td colSpan={3} style={{textAlign:'right'}}>Totals</td>
-                  <td style={{color:'var(--teal)'}}>{fmt$(tas.reduce((s,ta)=>{const c=calcCommission(txn,ta,getPlan(ta),ytdMap[ta.agent_id]||0);return s+c.agent_net},0))}</td>
-                  <td>{fmt$(tas.reduce((s,ta)=>{const c=calcCommission(txn,ta,getPlan(ta),ytdMap[ta.agent_id]||0);return s+c.broker_net},0))}</td>
+                  <td style={{color:'var(--teal)'}}>{fmt$(tas.reduce((s,ta,i)=>{const c=calcCommission(txn,ta,getPlan(ta),ytdMap[ta.agent_id]||0,i===0);return s+c.agent_net},0))}</td>
+                  <td>{fmt$(tas.reduce((s,ta,i)=>{const c=calcCommission(txn,ta,getPlan(ta),ytdMap[ta.agent_id]||0,i===0);return s+c.broker_net},0))}</td>
                   <td colSpan={2}></td>
                 </tr>
               </tbody>
@@ -497,7 +497,7 @@ export default function TransactionDetail() {
               <thead><tr><th>Agent</th><th>Split</th><th>Plan</th><th>Agent Net</th><th>Broker Net</th><th>Volume Credit</th><th>Individual Disb</th></tr></thead>
               <tbody>
                 {tas.map((ta,i)=>{
-                  const plan=getPlan(ta); const comm=calcCommission(txn,ta,plan,ytdMap[ta.agent_id]||0)
+                  const plan=getPlan(ta); const comm=calcCommission(txn,ta,plan,ytdMap[ta.agent_id]||0,i===0)
                   const ao=agents.find(a=>a.id===ta.agent_id)||ta.agents
                   const vol=(Number(txn.sale_price)||0)*((Number(ta.volume_pct)||0)/100)
                   const indiv=disbs.find(d=>d.agent_id===ta.agent_id)
@@ -513,8 +513,8 @@ export default function TransactionDetail() {
                 })}
                 <tr style={{background:'var(--surf)',fontWeight:700}}>
                   <td colSpan={3} style={{textAlign:'right'}}>Totals</td>
-                  <td style={{color:'var(--teal)'}}>{fmt$(tas.reduce((s,ta)=>{const c=calcCommission(txn,ta,getPlan(ta),ytdMap[ta.agent_id]||0);return s+c.agent_net},0))}</td>
-                  <td>{fmt$(tas.reduce((s,ta)=>{const c=calcCommission(txn,ta,getPlan(ta),ytdMap[ta.agent_id]||0);return s+c.broker_net},0))}</td>
+                  <td style={{color:'var(--teal)'}}>{fmt$(tas.reduce((s,ta,i)=>{const c=calcCommission(txn,ta,getPlan(ta),ytdMap[ta.agent_id]||0,i===0);return s+c.agent_net},0))}</td>
+                  <td>{fmt$(tas.reduce((s,ta,i)=>{const c=calcCommission(txn,ta,getPlan(ta),ytdMap[ta.agent_id]||0,i===0);return s+c.broker_net},0))}</td>
                   <td colSpan={2}></td>
                 </tr>
               </tbody>
@@ -527,7 +527,7 @@ export default function TransactionDetail() {
             <thead><tr><th>Agent</th><th>Agent Net</th><th>Created</th><th>Status</th><th></th></tr></thead>
             <tbody>{indivDisbs.map(d=>{
               const ta=tas.find(t=>t.agent_id===d.agent_id)
-              const comm=ta?calcCommission(txn,ta,getPlan(ta),ytdMap[ta.agent_id]||0):null
+              const comm=ta?calcCommission(txn,ta,getPlan(ta),ytdMap[ta.agent_id]||0,tas.indexOf(ta)===0):null
               const ao=agents.find(a=>a.id===d.agent_id)||ta?.agents
               return <tr key={d.id}>
                 <td style={{fontWeight:600}}>{ao?.first_name} {ao?.last_name}</td>
