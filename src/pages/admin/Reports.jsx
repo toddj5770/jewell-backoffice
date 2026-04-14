@@ -11,6 +11,9 @@ const BUILTIN_REPORTS = [
   { id: 'agent_production',   name: 'Agent Production Ranking',  icon: '🏆', desc: 'Agents ranked by volume and GCI' },
   { id: 'monthly_trend',      name: 'Monthly Trend',             icon: '📈', desc: 'GCI and deal count by month' },
   { id: 'disbursement_summary',name: 'Disbursement Summary',     icon: '💰', desc: 'Paid vs pending disbursements' },
+  { id: 'pending_income',      name: 'Pending Income by Agent',   icon: '⏳', desc: 'Projected agent & office income from open deals' },
+  { id: 'office_pipeline',     name: 'Office Pipeline',           icon: '🔄', desc: 'All open deals sorted by expected close date with full commission breakdown' },
+  { id: 'projected_by_month',  name: 'Projected Income by Month', icon: '📅', desc: 'Anticipated GCI and agent/broker net grouped by estimated close month' },
 ]
 
 const COLUMN_OPTIONS = {
@@ -256,6 +259,116 @@ export default function Reports() {
             data.push([t.street_address + ', ' + t.city, a.first_name + ' ' + a.last_name, fmt$(agentNet), t.close_date || '—', '—'])
           })
         })
+        break
+      }
+
+      case 'pending_income': {
+        columns = ['Agent', 'Office', 'Address', 'Status', 'Sale Price', 'Est. Close', 'Proj. Gross', 'Agent Net', 'Broker Net', 'Plan']
+        const openTxns = transactions.filter(t => t.status === 'active' || t.status === 'pending')
+        openTxns.forEach(t => {
+          const gross = (t.sale_price || 0) * ((t.selling_commission_pct || 0) / 100)
+          ;(t.transaction_agents || []).forEach(ta => {
+            const a = ta.agents; if (!a) return
+            const agentObj = agents.find(ag => ag.id === ta.agent_id)
+            const plan = ta.plans || agentObj?.plans
+            const agentSplit = ta.split_type === 'dollar' ? ta.split_value : gross * ((ta.split_value || 100) / 100)
+            const agentPct = plan?.type === 'cap' ? (plan.cap_levels?.[0]?.pct || 90) : (plan?.agent_pct || 80)
+            const agentNet = agentSplit * (agentPct / 100)
+            const brokerNet = agentSplit - agentNet
+            data.push([
+              a.first_name + ' ' + a.last_name,
+              agentObj?.office || '—',
+              t.street_address + ', ' + t.city,
+              t.status.charAt(0).toUpperCase() + t.status.slice(1),
+              fmt$(t.sale_price),
+              t.estimated_close_date || '—',
+              fmt$(agentSplit),
+              fmt$(agentNet),
+              fmt$(brokerNet),
+              plan?.name || '—'
+            ])
+          })
+        })
+        data.sort((a, b) => {
+          if (a[5] === '—') return 1
+          if (b[5] === '—') return -1
+          return a[5].localeCompare(b[5])
+        })
+        break
+      }
+
+      case 'office_pipeline': {
+        columns = ['Est. Close', 'Address', 'City', 'Status', 'Sale Price', 'Gross Comm', 'Agent(s)', 'Total Agent Net', 'Office Net', 'Lead Source']
+        const openTxns2 = transactions.filter(t => t.status === 'active' || t.status === 'pending')
+        openTxns2.forEach(t => {
+          const gross = (t.sale_price || 0) * ((t.selling_commission_pct || 0) / 100)
+          let totalAgentNet = 0, totalBrokerNet = 0
+          const agentNames = []
+          ;(t.transaction_agents || []).forEach(ta => {
+            const a = ta.agents; if (!a) return
+            agentNames.push(a.first_name + ' ' + a.last_name)
+            const agentObj = agents.find(ag => ag.id === ta.agent_id)
+            const plan = ta.plans || agentObj?.plans
+            const agentSplit = ta.split_type === 'dollar' ? ta.split_value : gross * ((ta.split_value || 100) / 100)
+            const agentPct = plan?.type === 'cap' ? (plan.cap_levels?.[0]?.pct || 90) : (plan?.agent_pct || 80)
+            totalAgentNet += agentSplit * (agentPct / 100)
+            totalBrokerNet += agentSplit * ((100 - agentPct) / 100)
+          })
+          data.push([
+            t.estimated_close_date || '—',
+            t.street_address,
+            t.city,
+            t.status.charAt(0).toUpperCase() + t.status.slice(1),
+            fmt$(t.sale_price),
+            fmt$(gross),
+            agentNames.join(', ') || '—',
+            fmt$(totalAgentNet),
+            fmt$(totalBrokerNet),
+            t.lead_source || '—'
+          ])
+        })
+        data.sort((a, b) => {
+          if (a[0] === '—') return 1
+          if (b[0] === '—') return -1
+          return a[0].localeCompare(b[0])
+        })
+        // Add totals row
+        const totGross = openTxns2.reduce((s,t) => s + (t.sale_price||0)*((t.selling_commission_pct||0)/100), 0)
+        data.push(['', 'TOTALS (' + openTxns2.length + ' deals)', '', '', fmt$(openTxns2.reduce((s,t)=>s+(t.sale_price||0),0)), fmt$(totGross), '', '', '', ''])
+        break
+      }
+
+      case 'projected_by_month': {
+        columns = ['Month', 'Open Deals', 'Proj. Gross GCI', 'Proj. Agent Net', 'Proj. Office Net', 'Avg Deal Size']
+        const openTxns3 = transactions.filter(t => (t.status === 'active' || t.status === 'pending') && t.estimated_close_date)
+        const monthMap = {}
+        openTxns3.forEach(t => {
+          const mo = t.estimated_close_date.slice(0, 7)
+          const gross = (t.sale_price || 0) * ((t.selling_commission_pct || 0) / 100)
+          let agentNet = 0, brokerNet = 0
+          ;(t.transaction_agents || []).forEach(ta => {
+            const agentObj = agents.find(ag => ag.id === ta.agent_id)
+            const plan = ta.plans || agentObj?.plans
+            const agentSplit = ta.split_type === 'dollar' ? ta.split_value : gross * ((ta.split_value || 100) / 100)
+            const agentPct = plan?.type === 'cap' ? (plan.cap_levels?.[0]?.pct || 90) : (plan?.agent_pct || 80)
+            agentNet += agentSplit * (agentPct / 100)
+            brokerNet += agentSplit * ((100 - agentPct) / 100)
+          })
+          if (!monthMap[mo]) monthMap[mo] = { deals: 0, volume: 0, gross: 0, agentNet: 0, brokerNet: 0 }
+          monthMap[mo].deals++
+          monthMap[mo].volume += (t.sale_price || 0)
+          monthMap[mo].gross += gross
+          monthMap[mo].agentNet += agentNet
+          monthMap[mo].brokerNet += brokerNet
+        })
+        const moNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+        data = Object.entries(monthMap).sort().map(([mo, r]) => {
+          const [y, m] = mo.split('-')
+          return [moNames[parseInt(m)-1] + ' ' + y, r.deals, fmt$(r.gross), fmt$(r.agentNet), fmt$(r.brokerNet), fmt$(r.deals ? r.volume/r.deals : 0)]
+        })
+        // Totals
+        const allMonths = Object.values(monthMap)
+        data.push(['TOTAL', openTxns3.length, fmt$(allMonths.reduce((s,r)=>s+r.gross,0)), fmt$(allMonths.reduce((s,r)=>s+r.agentNet,0)), fmt$(allMonths.reduce((s,r)=>s+r.brokerNet,0)), ''])
         break
       }
     }
