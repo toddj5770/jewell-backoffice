@@ -600,8 +600,11 @@ export default function Reports() {
         columns = ['Section','Address','City','Role','Close Date','Sale Price','Gross Comm','Agent Split %','Agent Net','Admin Fee','Office Net','Lead Source']
 
         closedInRange.forEach(t => {
-          ;(t.transaction_agents || []).forEach((ta, idx) => {
-            if (aid && ta.agent_id !== aid) return
+          const tas = t.transaction_agents || []
+          // When an agent is selected, only show that agent's row
+          const tasToShow = aid ? tas.filter(ta => ta.agent_id === aid) : tas
+          tasToShow.forEach((ta) => {
+            const idx = tas.indexOf(ta) // get original index for admin fee calc
             const plan = ta.plans
             const agentPct = plan?.type === 'cap' ? (plan.cap_levels?.[0]?.pct || 90) : (plan?.agent_pct || 80)
             const split = ta.split_type === 'dollar' ? ta.split_value : t.gross_commission * ((ta.split_value || 100) / 100)
@@ -635,8 +638,11 @@ export default function Reports() {
 
         // Section 2: Open pipeline
         openDeals.forEach(t => {
-          ;(t.transaction_agents || []).forEach((ta, idx) => {
-            if (aid && ta.agent_id !== aid) return
+          const tas = t.transaction_agents || []
+          // When an agent is selected, only show that agent's row
+          const tasToShow = aid ? tas.filter(ta => ta.agent_id === aid) : tas
+          tasToShow.forEach((ta) => {
+            const idx = tas.indexOf(ta)
             const plan = ta.plans
             const agentPct = plan?.type === 'cap' ? (plan.cap_levels?.[0]?.pct || 90) : (plan?.agent_pct || 80)
             const split = ta.split_type === 'dollar' ? ta.split_value : t.gross_commission * ((ta.split_value || 100) / 100)
