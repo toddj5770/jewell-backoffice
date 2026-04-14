@@ -214,7 +214,7 @@ export default function Reports() {
   })
 
   function applyPreset(preset) {
-    if (preset === 'custom') {
+    if (preset === 'custom' || preset === 'all') {
       setBuiltinFilters(f => ({...f, preset}))
       return
     }
@@ -441,7 +441,12 @@ export default function Reports() {
     const df = builtinFilters.dateFrom, dt = builtinFilters.dateTo
     const inRange = t => { const d = t.close_date; return d && d >= df && d <= dt }
     const closed = transactions.filter(t => t.status === 'closed' && inRange(t))
-    const open = transactions.filter(t => t.status === 'active' || t.status === 'pending')
+    const open = transactions.filter(t => {
+      if (!(['active','pending'].includes(t.status))) return false
+      if (builtinFilters.preset === 'all' || !builtinFilters.dateFrom) return true
+      const d = t.estimated_close_date
+      return d && d >= df && d <= dt
+    })
     let columns = [], rows = []
     const thisYear = new Date().getFullYear()
     const moNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
@@ -621,9 +626,18 @@ export default function Reports() {
                   <span style={{color:'rgba(255,255,255,.5)',fontSize:12}}>→</span>
                   <input className="form-ctrl" type="date" value={builtinFilters.dateTo} onChange={e=>setBuiltinFilters(f=>({...f,dateTo:e.target.value,preset:'custom'}))} style={{width:140}}/>
                 </>}
-                {['pending_income','office_pipeline','projected_by_month'].includes(activeReport.id) && (
-                  <span style={{fontSize:11,color:'var(--gold-lt)',background:'rgba(255,255,255,.1)',padding:'4px 10px',borderRadius:'var(--r)'}}>Shows all open deals (active & pending)</span>
-                )}
+                {['pending_income','office_pipeline','projected_by_month'].includes(activeReport.id) && <>
+                  <span style={{fontSize:11,color:'rgba(255,255,255,.5)'}}>Est. Close:</span>
+                  <select className="form-ctrl" value={builtinFilters.preset} onChange={e=>applyPreset(e.target.value)} style={{width:160}}>
+                    <option value="all">All Open Deals</option>
+                    {DATE_PRESETS.map(p=><option key={p.value} value={p.value}>{p.label}</option>)}
+                  </select>
+                  {builtinFilters.preset !== 'all' && <>
+                    <input className="form-ctrl" type="date" value={builtinFilters.dateFrom} onChange={e=>setBuiltinFilters(f=>({...f,dateFrom:e.target.value,preset:'custom'}))} style={{width:140}}/>
+                    <span style={{color:'rgba(255,255,255,.5)',fontSize:12}}>→</span>
+                    <input className="form-ctrl" type="date" value={builtinFilters.dateTo} onChange={e=>setBuiltinFilters(f=>({...f,dateTo:e.target.value,preset:'custom'}))} style={{width:140}}/>
+                  </>}
+                </>}
                 <button className="btn btn-navy btn-sm" onClick={()=>runBuiltinReport(activeReport.id)}>↻ Run</button>
                 <button className="btn btn-ghost btn-sm" onClick={()=>{
                   const base = FIELDS.transactions
