@@ -37,12 +37,22 @@ export default function AgentDetail() {
   async function save() {
     setSaving(true)
     if(!agent.first_name||!agent.email){alert('Name and email required');setSaving(false);return}
+    // Clean empty date strings to null
+    const cleanAgent = {...agent,
+      start_date: agent.start_date||null,
+      license_expiration: agent.license_expiration||null,
+      license_issue_date: agent.license_issue_date||null,
+      eando_expiration: agent.eando_expiration||null,
+      w9_date: agent.w9_date||null,
+      plan_assigned_date: agent.plan_assigned_date||null,
+      plan_id: agent.plan_id||null,
+    }
     if(isNew){
-      const{data,error}=await supabase.from('agents').insert(agent).select().single()
+      const{data,error}=await supabase.from('agents').insert(cleanAgent).select().single()
       if(error){alert(error.message);setSaving(false);return}
       setSaving(false); navigate(`/agents/${data.id}`)
     } else {
-      await supabase.from('agents').update(agent).eq('id',id)
+      await supabase.from('agents').update(cleanAgent).eq('id',id)
       setSaving(false); setEditing(false); await load()
     }
   }
