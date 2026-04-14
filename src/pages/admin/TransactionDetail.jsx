@@ -75,14 +75,15 @@ export default function TransactionDetail() {
     return agents.find(a=>a.id===ta.agent_id)?.plans||null
   }
   function addTA() {
-    setTas(rows=>[...rows,{_new:true,agent_id:'',split_type:'percent',split_value:rows.length===0?100:0,volume_pct:rows.length===0?100:0,plan_id:null,sort_order:rows.length}])
+    setTas(rows=>[...rows,{_new:true,agent_id:'',split_type:'percent',split_value:rows.length===0?100:0,volume_pct:0,plan_id:null,sort_order:rows.length}])
   }
   function updTA(i, c) {
     setTas(rows => {
       const updated = rows.map((r, j) => j === i ? {...r, ...c} : r)
-      // Auto-balance percent splits when there are exactly 2 agents
+      // Auto-balance commission split % only (NOT volume credit — that's independent)
       if (
         'split_value' in c &&
+        !('volume_pct' in c) &&
         updated.length === 2 &&
         updated[0].split_type === 'percent' &&
         updated[1].split_type === 'percent'
@@ -91,11 +92,6 @@ export default function TransactionDetail() {
         const otherIdx = i === 0 ? 1 : 0
         const otherVal = Math.max(0, Math.min(100, 100 - changedVal))
         updated[otherIdx] = {...updated[otherIdx], split_value: otherVal}
-        // Also auto-balance volume_pct if it matches the old split
-        if (!('volume_pct' in c)) {
-          updated[i] = {...updated[i], volume_pct: changedVal}
-          updated[otherIdx] = {...updated[otherIdx], volume_pct: otherVal}
-        }
       }
       return updated
     })
@@ -411,7 +407,7 @@ export default function TransactionDetail() {
                   <div className="form-group" style={{marginBottom:0}}>
                     <label className="form-label">Volume Credit %</label>
                     <input className="form-ctrl" type="number" step="1" min="0" max="100" value={ta.volume_pct||''} disabled={isClosed} onChange={e=>updTA(i,{volume_pct:e.target.value})}/>
-                    <div className="form-hint">% of sale price toward cap</div>
+                    <div className="form-hint">% of sale price credited toward this agent's cap — independent of commission split</div>
                   </div>
                   {ta.agent_id&&txn.sale_price&&<div style={{padding:'10px 14px',background:'var(--surf)',borderRadius:'var(--r)',border:'1px solid var(--bdr)',fontSize:12,display:'flex',gap:24}}>
                     <div><div style={{color:'var(--txt3)',fontSize:10}}>Volume Credit</div><div style={{fontWeight:700,fontSize:15}}>{fmt$((Number(txn.sale_price)||0)*((Number(ta.volume_pct)||0)/100))}</div></div>
