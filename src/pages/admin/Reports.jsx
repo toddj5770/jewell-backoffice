@@ -582,7 +582,12 @@ export default function Reports() {
         })
 
         const closedInRange = agentTxns.filter(t => t.status === 'closed' && t.close_date >= df && t.close_date <= dt)
-        const openDeals = agentTxns.filter(t => t.status === 'active' || t.status === 'pending')
+        const openDeals = agentTxns.filter(t => {
+          if (!(t.status === 'active' || t.status === 'pending')) return false
+          const est = t.estimated_close_date
+          if (!est) return true // no date — always show
+          return est >= df && est <= dt
+        })
 
         // Section 1: Closed income summary
         columns = ['Section','Address','City','Role','Close Date','Sale Price','Gross Comm','Agent Split %','Agent Net','Admin Fee','Office Net','Lead Source']
@@ -781,14 +786,13 @@ export default function Reports() {
                     <input type="checkbox" checked={builtinFilters.includeCoAgent} onChange={e=>setBuiltinFilters(f=>({...f,includeCoAgent:e.target.checked}))}/>
                     Include as Co-Agent
                   </label>
+                  <span style={{fontSize:11,color:'rgba(255,255,255,.5)'}}>Close/Est. Close:</span>
                   <select className="form-ctrl" value={builtinFilters.preset} onChange={e=>applyPreset(e.target.value)} style={{width:160}}>
                     {DATE_PRESETS.map(p=><option key={p.value} value={p.value}>{p.label}</option>)}
                   </select>
-                  {<>
-                    <input className="form-ctrl" type="date" value={builtinFilters.dateFrom} onChange={e=>setBuiltinFilters(f=>({...f,dateFrom:e.target.value,preset:'custom'}))} style={{width:130}}/>
-                    <span style={{color:'rgba(255,255,255,.5)',fontSize:12}}>→</span>
-                    <input className="form-ctrl" type="date" value={builtinFilters.dateTo} onChange={e=>setBuiltinFilters(f=>({...f,dateTo:e.target.value,preset:'custom'}))} style={{width:130}}/>
-                  </>}
+                  <input className="form-ctrl" type="date" value={builtinFilters.dateFrom} onChange={e=>setBuiltinFilters(f=>({...f,dateFrom:e.target.value,preset:'custom'}))} style={{width:130}}/>
+                  <span style={{color:'rgba(255,255,255,.5)',fontSize:12}}>→</span>
+                  <input className="form-ctrl" type="date" value={builtinFilters.dateTo} onChange={e=>setBuiltinFilters(f=>({...f,dateTo:e.target.value,preset:'custom'}))} style={{width:130}}/>
                 </>}
                 <button className="btn btn-navy btn-sm" onClick={()=>runBuiltinReport(activeReport.id)}>↻ Run</button>
                 <button className="btn btn-ghost btn-sm" onClick={()=>{
