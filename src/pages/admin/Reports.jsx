@@ -343,7 +343,7 @@ export default function Reports() {
     setView('run')
     const { transactions, agents } = allData
     const df = builtinFilters.dateFrom, dt = builtinFilters.dateTo
-    const inRange = t => { const d = t.close_date || t.estimated_close_date; return d >= df && d <= dt }
+    const inRange = t => { const d = t.close_date; return d && d >= df && d <= dt }
     const closed = transactions.filter(t => t.status === 'closed' && inRange(t))
     const open = transactions.filter(t => t.status === 'active' || t.status === 'pending')
     let columns = [], rows = []
@@ -381,7 +381,7 @@ export default function Reports() {
       }
       case 'transaction_summary': {
         columns = ['Address','City','Type','Status','Sale Price','Gross GCI','Agent(s)','Agent Net','Admin Fee','Office Net','Close Date','Lead Source']
-        transactions.filter(t=>inRange(t)).forEach(t => {
+        transactions.filter(t=>t.close_date && inRange(t)).forEach(t => {
           rows.push([t.street_address,t.city,t.type,t.status,fmt$(t.sale_price),fmt$(t.gross_commission),t.agent_names,fmt$(t.agent_net),fmt$(t.admin_fee_collected),fmt$(t.total_office_income),t.close_date||'—',t.lead_source||'—'])
         })
         break
@@ -517,9 +517,14 @@ export default function Reports() {
           <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
             {isBuiltin && (
               <>
-                <input className="form-ctrl" type="date" value={builtinFilters.dateFrom} onChange={e=>setBuiltinFilters(f=>({...f,dateFrom:e.target.value}))} style={{width:140}}/>
-                <span style={{color:'var(--txt3)',fontSize:12}}>to</span>
-                <input className="form-ctrl" type="date" value={builtinFilters.dateTo} onChange={e=>setBuiltinFilters(f=>({...f,dateTo:e.target.value}))} style={{width:140}}/>
+                {!['pending_income','office_pipeline','projected_by_month'].includes(activeReport.id) && <>
+                  <input className="form-ctrl" type="date" value={builtinFilters.dateFrom} onChange={e=>setBuiltinFilters(f=>({...f,dateFrom:e.target.value}))} style={{width:140}}/>
+                  <span style={{color:'var(--txt3)',fontSize:12}}>to</span>
+                  <input className="form-ctrl" type="date" value={builtinFilters.dateTo} onChange={e=>setBuiltinFilters(f=>({...f,dateTo:e.target.value}))} style={{width:140}}/>
+                </>}
+                {['pending_income','office_pipeline','projected_by_month'].includes(activeReport.id) && (
+                  <span style={{fontSize:11,color:'var(--gold-lt)',background:'rgba(255,255,255,.1)',padding:'4px 10px',borderRadius:'var(--r)'}}>Shows all open deals (active & pending)</span>
+                )}
                 <button className="btn btn-navy btn-sm" onClick={()=>runBuiltinReport(activeReport.id)}>↻ Run</button>
                 <button className="btn btn-ghost btn-sm" onClick={()=>{
                   const base = FIELDS.transactions
