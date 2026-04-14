@@ -94,6 +94,92 @@ const BUILTIN_REPORTS = [
   { id: 'projected_by_month',  name: 'Projected Income by Month',  icon: '📅', desc: 'Anticipated income grouped by estimated close month' },
 ]
 
+function getDatePreset(preset) {
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = now.getMonth()
+  const pad = n => String(n).padStart(2,'0')
+  const ymd = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`
+  switch(preset) {
+    case 'this_month': {
+      const from = new Date(y, m, 1)
+      const to = new Date(y, m+1, 0)
+      return { dateFrom: ymd(from), dateTo: ymd(to) }
+    }
+    case 'last_month': {
+      const from = new Date(y, m-1, 1)
+      const to = new Date(y, m, 0)
+      return { dateFrom: ymd(from), dateTo: ymd(to) }
+    }
+    case 'next_month': {
+      const from = new Date(y, m+1, 1)
+      const to = new Date(y, m+2, 0)
+      return { dateFrom: ymd(from), dateTo: ymd(to) }
+    }
+    case 'this_quarter': {
+      const q = Math.floor(m/3)
+      const from = new Date(y, q*3, 1)
+      const to = new Date(y, q*3+3, 0)
+      return { dateFrom: ymd(from), dateTo: ymd(to) }
+    }
+    case 'last_quarter': {
+      const q = Math.floor(m/3) - 1
+      const qy = q < 0 ? y-1 : y
+      const qq = q < 0 ? 3 : q
+      const from = new Date(qy, qq*3, 1)
+      const to = new Date(qy, qq*3+3, 0)
+      return { dateFrom: ymd(from), dateTo: ymd(to) }
+    }
+    case 'next_quarter': {
+      const q = Math.floor(m/3) + 1
+      const qy = q > 3 ? y+1 : y
+      const qq = q > 3 ? 0 : q
+      const from = new Date(qy, qq*3, 1)
+      const to = new Date(qy, qq*3+3, 0)
+      return { dateFrom: ymd(from), dateTo: ymd(to) }
+    }
+    case 'this_fy': {
+      // Fiscal year Jan-Dec
+      return { dateFrom: `${y}-01-01`, dateTo: `${y}-12-31` }
+    }
+    case 'last_fy': {
+      return { dateFrom: `${y-1}-01-01`, dateTo: `${y-1}-12-31` }
+    }
+    case 'ytd': {
+      return { dateFrom: `${y}-01-01`, dateTo: ymd(now) }
+    }
+    case 'last_30': {
+      const from = new Date(now); from.setDate(from.getDate()-30)
+      return { dateFrom: ymd(from), dateTo: ymd(now) }
+    }
+    case 'last_90': {
+      const from = new Date(now); from.setDate(from.getDate()-90)
+      return { dateFrom: ymd(from), dateTo: ymd(now) }
+    }
+    case 'last_12m': {
+      const from = new Date(now); from.setMonth(from.getMonth()-12)
+      return { dateFrom: ymd(from), dateTo: ymd(now) }
+    }
+    default: return null
+  }
+}
+
+const DATE_PRESETS = [
+  { value: 'ytd',          label: 'Year to Date' },
+  { value: 'this_month',   label: 'This Month' },
+  { value: 'last_month',   label: 'Last Month' },
+  { value: 'next_month',   label: 'Next Month' },
+  { value: 'this_quarter', label: 'This Quarter' },
+  { value: 'last_quarter', label: 'Last Quarter' },
+  { value: 'next_quarter', label: 'Next Quarter' },
+  { value: 'this_fy',      label: 'This Fiscal Year' },
+  { value: 'last_fy',      label: 'Last Fiscal Year' },
+  { value: 'last_30',      label: 'Last 30 Days' },
+  { value: 'last_90',      label: 'Last 90 Days' },
+  { value: 'last_12m',     label: 'Last 12 Months' },
+  { value: 'custom',       label: 'Custom Range' },
+]
+
 function emptyReport() {
   return {
     id: null,
@@ -124,7 +210,17 @@ export default function Reports() {
   const [builtinFilters, setBuiltinFilters] = useState({
     dateFrom: new Date().getFullYear() + '-01-01',
     dateTo: new Date().toISOString().slice(0, 10),
+    preset: 'ytd',
   })
+
+  function applyPreset(preset) {
+    if (preset === 'custom') {
+      setBuiltinFilters(f => ({...f, preset}))
+      return
+    }
+    const range = getDatePreset(preset)
+    if (range) setBuiltinFilters({...range, preset})
+  }
 
   useEffect(() => { loadMeta() }, [])
 
@@ -518,9 +614,12 @@ export default function Reports() {
             {isBuiltin && (
               <>
                 {!['pending_income','office_pipeline','projected_by_month'].includes(activeReport.id) && <>
-                  <input className="form-ctrl" type="date" value={builtinFilters.dateFrom} onChange={e=>setBuiltinFilters(f=>({...f,dateFrom:e.target.value}))} style={{width:140}}/>
-                  <span style={{color:'var(--txt3)',fontSize:12}}>to</span>
-                  <input className="form-ctrl" type="date" value={builtinFilters.dateTo} onChange={e=>setBuiltinFilters(f=>({...f,dateTo:e.target.value}))} style={{width:140}}/>
+                  <select className="form-ctrl" value={builtinFilters.preset} onChange={e=>applyPreset(e.target.value)} style={{width:160}}>
+                    {DATE_PRESETS.map(p=><option key={p.value} value={p.value}>{p.label}</option>)}
+                  </select>
+                  <input className="form-ctrl" type="date" value={builtinFilters.dateFrom} onChange={e=>setBuiltinFilters(f=>({...f,dateFrom:e.target.value,preset:'custom'}))} style={{width:140}}/>
+                  <span style={{color:'rgba(255,255,255,.5)',fontSize:12}}>→</span>
+                  <input className="form-ctrl" type="date" value={builtinFilters.dateTo} onChange={e=>setBuiltinFilters(f=>({...f,dateTo:e.target.value,preset:'custom'}))} style={{width:140}}/>
                 </>}
                 {['pending_income','office_pipeline','projected_by_month'].includes(activeReport.id) && (
                   <span style={{fontSize:11,color:'var(--gold-lt)',background:'rgba(255,255,255,.1)',padding:'4px 10px',borderRadius:'var(--r)'}}>Shows all open deals (active & pending)</span>
