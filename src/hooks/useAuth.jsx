@@ -9,16 +9,6 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    // Check URL hash FIRST before anything else loads
-    // Supabase puts tokens in the hash for invite/recovery links
-    const hash = window.location.hash
-    const isInviteOrRecovery = hash.includes('type=invite') || hash.includes('type=recovery') || hash.includes('type=signup')
-    if (isInviteOrRecovery && window.location.pathname !== '/set-password') {
-      // Redirect immediately, preserving the hash so set-password can use the token
-      window.location.replace('/set-password' + hash)
-      return
-    }
-
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
       if (session) fetchProfile(session.user.id)
@@ -29,9 +19,10 @@ export function AuthProvider({ children }) {
       setSession(session)
       if (session) fetchProfile(session.user.id)
       else { setProfile(null); setLoading(false) }
-      // Catch PASSWORD_RECOVERY event (reset password link)
+      // PASSWORD_RECOVERY event fires when user clicks reset password link
       if (event === 'PASSWORD_RECOVERY') {
         window.location.replace('/set-password')
+        return
       }
     })
 
@@ -39,10 +30,9 @@ export function AuthProvider({ children }) {
   }, [])
 
   async function fetchProfile(userId) {
-    // Simple query - just get the profile row, no joins
     const { data, error } = await supabase
       .from('profiles')
-      .select('id, role, agent_id, first_name, last_name')
+      .select('id, role, agent_id, first_name, last_name, needs_password')
       .eq('id', userId)
       .single()
     
@@ -53,6 +43,10 @@ export function AuthProvider({ children }) {
     }
     setProfile(data)
     setLoading(false)
+    // If admin flagged this user as needing to set a password, redirect them
+    if (data?.needs_password && window.location.pathname !== '/set-password') {
+      window.location.replace('/set-password')
+    }
   }
 
   async function signIn(email, password) {
