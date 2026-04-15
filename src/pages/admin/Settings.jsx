@@ -188,6 +188,7 @@ function UserManagement() {
             agent_id: invite.agent_id || null,
             first_name: invite.first_name || null,
             last_name: invite.last_name || null,
+            needs_password: true,
           })
         }
         alert(`✓ Invite sent to ${invite.email}. They will receive an email to set their password.`)
@@ -335,6 +336,7 @@ function UserManagement() {
                         <div style={{ display: 'flex', gap: 6 }}>
                           <button className="btn btn-ghost btn-sm" onClick={() => setEditUser(null)}>Cancel</button>
                           <button className="btn btn-teal btn-sm" onClick={() => updateUser(u.id, { role: editUser.role, agent_id: editUser.agent_id })}>Save</button>
+                          <button className="btn btn-ghost btn-sm" style={{color:'var(--amber)'}} onClick={() => updateUser(u.id, { needs_password: true })}>🔑 Force PW Reset</button>
                         </div>
                       ) : (
                         <button className="btn btn-ghost btn-sm" onClick={() => setEditUser({ ...u })}>✏ Edit</button>
