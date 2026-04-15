@@ -442,6 +442,7 @@ export default function Reports() {
   function runBuiltinReport(id, overrideFilters) {
     if (!allData) return
     const activeFilters = overrideFilters || builtinFilters
+    console.log('runBuiltinReport:', id, 'agentId:', activeFilters.agentId, 'inclCo:', activeFilters.includeCoAgent)
     setLoading(true)
     setActiveReport({ id, builtin: true, name: BUILTIN_REPORTS.find(r=>r.id===id)?.name })
     setView('run')
@@ -623,6 +624,8 @@ export default function Reports() {
 
         // Section 1: Closed income summary
         columns = ['Section','Address','City','Role','Close Date','Sale Price','Agent Gross','Agent Split %','Agent Net','Admin Fee','Office Net','Lead Source']
+        console.log('agent_pipeline debug:', { aid, inclCo, df, dt, txnCount: agentTxns.length, openCount: openDeals.length })
+        if (openDeals[0]) console.log('first deal TAs:', openDeals[0].transaction_agents?.map(ta => ({id: ta.agent_id, split: ta.split_value})))
 
         let closedAgentNet = 0, closedAgentGross = 0, closedVolume = 0
         closedInRange.forEach(t => {
@@ -816,7 +819,10 @@ export default function Reports() {
                   <span style={{color:'rgba(255,255,255,.5)',fontSize:12}}>→</span>
                   <input className="form-ctrl" type="date" value={builtinFilters.dateTo} onChange={e=>setBuiltinFilters(f=>({...f,dateTo:e.target.value,preset:'custom'}))} style={{width:130}}/>
                 </>}
-                <button className="btn btn-navy btn-sm" onClick={()=>runBuiltinReport(activeReport.id, builtinFilters)}>↻ Run</button>
+                <button className="btn btn-navy btn-sm" onClick={()=>{
+                  console.log('Run clicked, builtinFilters:', builtinFilters)
+                  runBuiltinReport(activeReport.id, {...builtinFilters})
+                }}>↻ Run</button>
                 <button className="btn btn-ghost btn-sm" onClick={()=>{
                   const base = FIELDS.transactions
                   setReport({...emptyReport(), name: activeReport.name + ' (Custom)', id: null})
