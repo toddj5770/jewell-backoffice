@@ -442,7 +442,7 @@ export default function Reports() {
   function runBuiltinReport(id, overrideFilters) {
     if (!allData) return
     const activeFilters = overrideFilters || builtinFilters
-    console.log('runBuiltinReport activeFilters.agentId:', activeFilters.agentId)
+
     setLoading(true)
     setActiveReport({ id, builtin: true, name: BUILTIN_REPORTS.find(r=>r.id===id)?.name })
     setView('run')
@@ -572,6 +572,13 @@ export default function Reports() {
         const inclCo = activeFilters.includeCoAgent !== false
         const df = activeFilters.dateFrom, dt = activeFilters.dateTo
 
+        // Require agent selection
+        if (!aid) {
+          setReportData({ columns: ['Notice'], rows: [['Please select an agent from the dropdown above to run this report.']], total: 0 })
+          setLoading(false)
+          return
+        }
+
         // Get all transactions where this agent appears (primary or co-agent)
         const agentTxns = transactions.filter(t => {
           // Agent filter — check if selected agent appears on this deal
@@ -624,11 +631,7 @@ export default function Reports() {
 
         // Section 1: Closed income summary
         columns = ['Section','Address','City','Role','Close Date','Sale Price','Agent Gross','Agent Split %','Agent Net','Admin Fee','Office Net','Lead Source']
-        console.log('=== agent_pipeline ===')
-        console.log('aid:', JSON.stringify(aid))
-        console.log('rawAgents:', allData?.rawAgents?.map(a => ({id: a.id, name: a.first_name + ' ' + a.last_name})))
-        console.log('transactions[0] TAs:', transactions[0]?.transaction_agents?.map(ta => ({agent_id: ta.agent_id, split: ta.split_value})))
-        console.log('agentTxns count:', agentTxns.length)
+
 
         let closedAgentNet = 0, closedAgentGross = 0, closedVolume = 0
         closedInRange.forEach(t => {
@@ -804,8 +807,12 @@ export default function Reports() {
                       const nf = {...builtinFilters, agentId:e.target.value}
                       setBuiltinFilters(nf)
                     }} style={{width:180}}>
-                    <option value="">— All Agents —</option>
-                    {(allData?.rawAgents||[]).filter(a=>a.status==='active').sort((a,b)=>a.last_name.localeCompare(b.last_name)).map(a=><option key={a.id} value={a.id}>{a.first_name} {a.last_name}</option>)}
+                    <option value="">— Select Agent —</option>
+                    {(()=>{
+                      // Only show agents who actually appear in transactions
+                      const agentIdsInTxns = new Set((allData?.transactions||[]).flatMap(t=>(t.transaction_agents||[]).map(ta=>ta.agent_id)))
+                      return (allData?.rawAgents||[]).filter(a=>a.status==='active'&&agentIdsInTxns.has(a.id)).sort((a,b)=>a.last_name.localeCompare(b.last_name)).map(a=><option key={a.id} value={a.id}>{a.first_name} {a.last_name}</option>)
+                    })()}
                   </select>
                   <label style={{display:'flex',alignItems:'center',gap:6,color:'rgba(255,255,255,.7)',fontSize:12,cursor:'pointer'}}>
                     <input type="checkbox" checked={builtinFilters.includeCoAgent} onChange={e=>{
@@ -822,10 +829,7 @@ export default function Reports() {
                   <span style={{color:'rgba(255,255,255,.5)',fontSize:12}}>→</span>
                   <input className="form-ctrl" type="date" value={builtinFilters.dateTo} onChange={e=>setBuiltinFilters(f=>({...f,dateTo:e.target.value,preset:'custom'}))} style={{width:130}}/>
                 </>}
-                <button className="btn btn-navy btn-sm" onClick={()=>{
-                  console.log('Run clicked agentId:', builtinFilters.agentId)
-                  runBuiltinReport(activeReport.id, {...builtinFilters})
-                }}>↻ Run</button>
+                <button className="btn btn-navy btn-sm" onClick={()=>runBuiltinReport(activeReport.id, {...builtinFilters})}>↻ Run</button>
                 <button className="btn btn-ghost btn-sm" onClick={()=>{
                   const base = FIELDS.transactions
                   setReport({...emptyReport(), name: activeReport.name + ' (Custom)', id: null})
