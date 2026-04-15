@@ -9,6 +9,16 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
+    // Check URL hash FIRST before anything else loads
+    // Supabase puts tokens in the hash for invite/recovery links
+    const hash = window.location.hash
+    const isInviteOrRecovery = hash.includes('type=invite') || hash.includes('type=recovery') || hash.includes('type=signup')
+    if (isInviteOrRecovery && window.location.pathname !== '/set-password') {
+      // Redirect immediately, preserving the hash so set-password can use the token
+      window.location.replace('/set-password' + hash)
+      return
+    }
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
       if (session) fetchProfile(session.user.id)
@@ -19,11 +29,9 @@ export function AuthProvider({ children }) {
       setSession(session)
       if (session) fetchProfile(session.user.id)
       else { setProfile(null); setLoading(false) }
-      // When user arrives via invite or password reset link, send them to set-password
-      if ((event === 'PASSWORD_RECOVERY' || event === 'SIGNED_IN') && 
-          window.location.hash.includes('type=invite') ||
-          window.location.hash.includes('type=recovery')) {
-        window.location.href = '/set-password'
+      // Catch PASSWORD_RECOVERY event (reset password link)
+      if (event === 'PASSWORD_RECOVERY') {
+        window.location.replace('/set-password')
       }
     })
 
