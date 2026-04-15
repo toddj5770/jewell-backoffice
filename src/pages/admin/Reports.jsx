@@ -601,18 +601,24 @@ export default function Reports() {
         // Helper: compute a single agent's commission numbers from a transaction
         function agentCalc(t, ta) {
           const tas = t.transaction_agents || []
-          const isPrimary = tas.findIndex(x => x.agent_id === ta.agent_id) === 0
+          const taIdx = tas.findIndex(x => x.agent_id === ta.agent_id)
+          const isPrimary = taIdx === 0
           const plan = ta.plans
           const agentPct = plan?.type === 'cap' ? (plan.cap_levels?.[0]?.pct || 90) : (plan?.agent_pct || 80)
-          const split = ta.split_type === 'dollar' ? ta.split_value : t.gross_commission * ((ta.split_value || 100) / 100)
+          // split_value is this agent's % of the gross commission (e.g. 75 means 75% of gross goes to this agent's side)
+          // If only one agent, split_value should be 100
+          const splitPct = Number(ta.split_value ?? 100)
+          const agentGross = ta.split_type === 'dollar'
+            ? Number(ta.split_value || 0)
+            : t.gross_commission * (splitPct / 100)
           const feeAmt = isPrimary ? (plan?.fees?.find(f => f.name === 'Admin Fee')?.amt || 0) : 0
           const payer = t.admin_fee_payer || 'client'
-          let aN = split * (agentPct / 100)
-          let oN = split * ((100 - agentPct) / 100)
+          let aN = agentGross * (agentPct / 100)
+          let oN = agentGross * ((100 - agentPct) / 100)
           if (payer === 'agent') aN -= feeAmt
           else if (payer === 'broker') oN -= feeAmt
           const offAdmin = (payer === 'client' || payer === 'agent') ? feeAmt : 0
-          return { agentPct, split, aN, oN, offAdmin, feeAmt, isPrimary, role: isPrimary ? 'Primary' : 'Co-Agent' }
+          return { agentPct, split: agentGross, aN, oN, offAdmin, feeAmt, isPrimary, role: isPrimary ? 'Primary' : 'Co-Agent' }
         }
 
         // Section 1: Closed income summary
