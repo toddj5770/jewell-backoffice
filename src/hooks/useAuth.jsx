@@ -15,10 +15,16 @@ export function AuthProvider({ children }) {
       else setLoading(false)
     })
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       setSession(session)
       if (session) fetchProfile(session.user.id)
       else { setProfile(null); setLoading(false) }
+      // When user arrives via invite or password reset link, send them to set-password
+      if ((event === 'PASSWORD_RECOVERY' || event === 'SIGNED_IN') && 
+          window.location.hash.includes('type=invite') ||
+          window.location.hash.includes('type=recovery')) {
+        window.location.href = '/set-password'
+      }
     })
 
     return () => subscription.unsubscribe()
