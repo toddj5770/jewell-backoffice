@@ -4,6 +4,7 @@ import { Suspense, lazy } from 'react'
 import './index.css'
 
 import Login from './pages/Login'
+import SetPassword from './pages/SetPassword'
 import AppShell from './components/AppShell'
 import Dashboard from './pages/admin/Dashboard'
 import AgentDashboard from './pages/agent/AgentDashboard'
@@ -30,6 +31,8 @@ function ProtectedRoute({ children, adminOnly }) {
   const { session, profile, loading } = useAuth()
   if (loading) return <Loading />
   if (!session) return <Navigate to="/login" replace />
+  // If user has no password set yet (came from invite link), keep them on set-password
+  if (window.location.pathname === '/set-password') return children
   if (adminOnly && profile?.role === 'agent') return <Navigate to="/my-dashboard" replace />
   if (!adminOnly && profile?.role !== 'agent') return <Navigate to="/dashboard" replace />
   return children
@@ -46,6 +49,8 @@ function AppRoutes() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
+      <Route path="/set-password" element={<SetPassword />} />
+      <Route path="/set-password/*" element={<SetPassword />} />
       <Route path="/" element={<RootRedirect />} />
 
       {/* Admin routes */}
