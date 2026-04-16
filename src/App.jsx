@@ -9,19 +9,20 @@ import AppShell from './components/AppShell'
 import Dashboard from './pages/admin/Dashboard'
 import AgentDashboard from './pages/agent/AgentDashboard'
 
-const Transactions       = lazy(() => import('./pages/admin/Transactions'))
-const TransactionDetail  = lazy(() => import('./pages/admin/TransactionDetail'))
-const Agents             = lazy(() => import('./pages/admin/Agents'))
-const AgentDetail        = lazy(() => import('./pages/admin/AgentDetail'))
-const Plans              = lazy(() => import('./pages/admin/Plans'))
-const Money              = lazy(() => import('./pages/admin/Money'))
-const Billing            = lazy(() => import('./pages/admin/Billing'))
-const Onboarding         = lazy(() => import('./pages/admin/Onboarding'))
-const Reports            = lazy(() => import('./pages/admin/Reports'))
-const Settings           = lazy(() => import('./pages/admin/Settings'))
-const AgentTransactions  = lazy(() => import('./pages/agent/AgentTransactions'))
-const AgentDisbursements = lazy(() => import('./pages/agent/AgentDisbursements'))
-const AgentOnboarding    = lazy(() => import('./pages/agent/AgentOnboarding'))
+const Transactions          = lazy(() => import('./pages/admin/Transactions'))
+const TransactionDetail     = lazy(() => import('./pages/admin/TransactionDetail'))
+const Agents                = lazy(() => import('./pages/admin/Agents'))
+const AgentDetail           = lazy(() => import('./pages/admin/AgentDetail'))
+const Plans                 = lazy(() => import('./pages/admin/Plans'))
+const Money                 = lazy(() => import('./pages/admin/Money'))
+const Billing               = lazy(() => import('./pages/admin/Billing'))
+const Onboarding            = lazy(() => import('./pages/admin/Onboarding'))
+const Reports               = lazy(() => import('./pages/admin/Reports'))
+const Settings              = lazy(() => import('./pages/admin/Settings'))
+const AgentTransactions     = lazy(() => import('./pages/agent/AgentTransactions'))
+const AgentTransactionDetail = lazy(() => import('./pages/agent/AgentTransactionDetail'))
+const AgentDisbursements    = lazy(() => import('./pages/agent/AgentDisbursements'))
+const AgentOnboarding       = lazy(() => import('./pages/agent/AgentOnboarding'))
 
 function Loading() {
   return <div className="loading"><div className="spinner" />Loading…</div>
@@ -74,7 +75,7 @@ function AppRoutes() {
       <Route element={<ProtectedRoute adminOnly={false}><AppShell /></ProtectedRoute>}>
         <Route path="/my-dashboard"        element={<AgentDashboard />} />
         <Route path="/my-transactions"     element={<Suspense fallback={<Loading />}><AgentTransactions /></Suspense>} />
-        <Route path="/my-transactions/:id" element={<Suspense fallback={<Loading />}><AgentTransactions /></Suspense>} />
+        <Route path="/my-transactions/:id" element={<Suspense fallback={<Loading />}><AgentTransactionDetail /></Suspense>} />
         <Route path="/my-disbursements"    element={<Suspense fallback={<Loading />}><AgentDisbursements /></Suspense>} />
         <Route path="/my-onboarding"       element={<Suspense fallback={<Loading />}><AgentOnboarding /></Suspense>} />
       </Route>
