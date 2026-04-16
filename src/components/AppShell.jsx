@@ -109,6 +109,7 @@ export default function AppShell() {
             <NavLink className={({isActive}) => `nav-item${isActive?' active':''}`} to="/my-dashboard">My Dashboard</NavLink>
             <NavLink className={({isActive}) => `nav-item${isActive?' active':''}`} to="/my-transactions">My Transactions</NavLink>
             <NavLink className={({isActive}) => `nav-item${isActive?' active':''}`} to="/my-disbursements">My Disbursements</NavLink>
+            <NavLink className={({isActive}) => `nav-item${isActive?' active':''}`} to="/my-reports">My Reports</NavLink>
             <NavLink className={({isActive}) => `nav-item${isActive?' active':''}`} to="/my-onboarding">Onboarding</NavLink>
           </>
         )}
