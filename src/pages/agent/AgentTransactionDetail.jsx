@@ -9,18 +9,21 @@ export default function AgentTransactionDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
   const [txn, setTxn] = useState(null)
-  const [tas, setTas] = useState([])       // all agent splits on this deal
-  const [myTa, setMyTa] = useState(null)   // just mine
+  const [originalTxn, setOriginalTxn] = useState(null)  // for dirty detection
+  const [tas, setTas] = useState([])
+  const [myTa, setMyTa] = useState(null)
   const [myPlan, setMyPlan] = useState(null)
-  const [disb, setDisb] = useState(null)   // my disbursement, if any
+  const [disb, setDisb] = useState(null)
+  const [settings, setSettings] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
   const [tab, setTab] = useState('deal')
 
   useEffect(() => { if (profile?.agent_id && id) load() }, [profile, id])
 
   async function load() {
     setLoading(true)
-    const [tr, tar, dr] = await Promise.all([
+    const [tr, tar, dr, sr] = await Promise.all([
       supabase.from('transactions').select('*').eq('id', id).single(),
       supabase.from('transaction_agents')
         .select('*, agents(id,first_name,last_name), plans(*)')
@@ -30,22 +33,20 @@ export default function AgentTransactionDetail() {
         .select('*')
         .eq('transaction_id', id)
         .or(`agent_id.eq.${profile.agent_id},agent_id.is.null`),
+      supabase.from('settings').select('*').single(),
     ])
 
     if (tr.error || !tr.data) { setLoading(false); return }
     if (tar.data) {
-      // safety: make sure this agent is actually on this deal — otherwise kick them out
       const mine = tar.data.find(t => t.agent_id === profile.agent_id)
-      if (!mine) {
-        navigate('/my-transactions')
-        return
-      }
+      if (!mine) { navigate('/my-transactions'); return }
       setTas(tar.data)
       setMyTa(mine)
       setMyPlan(mine.plans || null)
     }
     setTxn(tr.data)
-    // Prefer the individual disbursement; fall back to the combined one
+    setOriginalTxn(tr.data)
+    setSettings(sr.data)
     if (dr.data && dr.data.length > 0) {
       const mine = dr.data.find(d => d.agent_id === profile.agent_id)
       setDisb(mine || dr.data.find(d => d.agent_id === null) || null)
@@ -58,10 +59,62 @@ export default function AgentTransactionDetail() {
 
   const isClosed = txn.status === 'closed'
   const isCancelled = txn.status === 'cancelled'
+  const canEdit = !isClosed && !isCancelled      // agents can edit active or pending only
   const myIndex = tas.findIndex(t => t.agent_id === profile.agent_id)
   const isPrimary = myIndex === 0
   const comm = calcCommission(txn, myTa, myPlan, 0, isPrimary)
   const volumeCredit = (Number(txn.sale_price) || 0) * ((Number(myTa.volume_pct) || 0) / 100)
+
+  const isDirty = originalTxn && JSON.stringify(txn) !== JSON.stringify(originalTxn)
+
+  function f(k, v) { setTxn(t => ({ ...t, [k]: v })) }
+
+  function addParty(side) { f(side, [...(txn[side] || []), { name: '', phone: '', email: '' }]) }
+  function updParty(side, i, k, v) {
+    const list = [...(txn[side] || [])]
+    list[i] = { ...list[i], [k]: v }
+    f(side, list)
+  }
+  function delParty(side, i) { f(side, (txn[side] || []).filter((_, j) => j !== i)) }
+
+  async function save() {
+    if (!txn.street_address || !txn.city) { alert('Street address and city are required.'); return }
+    setSaving(true)
+    const payload = {
+      // Bucket A — deal details
+      street_address: txn.street_address,
+      city: txn.city,
+      state: txn.state,
+      zip: txn.zip,
+      property_type: txn.property_type || null,
+      mls_number: txn.mls_number || null,
+      mortgage_company: txn.mortgage_company || null,
+      lead_source: txn.lead_source || null,
+      contract_acceptance_date: txn.contract_acceptance_date || null,
+      estimated_close_date: txn.estimated_close_date || null,
+      co_broke_company: txn.co_broke_company || null,
+      co_broke_agent: txn.co_broke_agent || null,
+      outside_referral_company: txn.outside_referral_company || null,
+      outside_referral_agent: txn.outside_referral_agent || null,
+      buyers: txn.buyers || [],
+      sellers: txn.sellers || [],
+      // Bucket B — deal money
+      type: txn.type,
+      sale_price: txn.sale_price ? Number(txn.sale_price) : null,
+      selling_commission_pct: txn.selling_commission_pct ? Number(txn.selling_commission_pct) : null,
+    }
+    const { error } = await supabase.from('transactions').update(payload).eq('id', id)
+    setSaving(false)
+    if (error) { alert('Could not save: ' + error.message); return }
+    await load()
+  }
+
+  function cancelChanges() {
+    if (!isDirty) return
+    if (window.confirm('Discard your unsaved changes?')) {
+      setTxn(originalTxn)
+    }
+  }
 
   function printStatement() {
     const isDraft = !isClosed
@@ -129,7 +182,7 @@ export default function AgentTransactionDetail() {
     w.document.close()
   }
 
-  // Activity timeline — derive key events from the transaction record
+  // Activity timeline
   const activity = []
   if (txn.contract_acceptance_date) activity.push({ date: txn.contract_acceptance_date, label: 'Contract accepted', kind: 'info' })
   if (txn.estimated_close_date && !txn.close_date) activity.push({ date: txn.estimated_close_date, label: 'Estimated close date', kind: 'info' })
@@ -141,9 +194,17 @@ export default function AgentTransactionDetail() {
   const totalWithheld = (txn.deductions_detail || []).reduce((s, d) => s + (Number(d.amount) || 0), 0)
   const myNetAfterWithheld = comm.agent_net - totalWithheld
 
+  const txTypes = settings?.transaction_types || ['selling', 'listing', 'dual', 'rental', 'referral']
+  const propTypes = settings?.property_types || ['Residential', 'Condo', 'Commercial', 'Land']
+  const mortgageCos = settings?.mortgage_companies || ['Cash', 'Wells Fargo', 'Rocket Mortgage']
+  const leadSources = settings?.lead_sources || []
+
   return (
     <div>
-      <div className="back-btn" onClick={() => navigate('/my-transactions')}>← Back to My Transactions</div>
+      <div className="back-btn" onClick={() => {
+        if (isDirty && !window.confirm('You have unsaved changes. Leave anyway?')) return
+        navigate('/my-transactions')
+      }}>← Back to My Transactions</div>
 
       <div className="sec-hdr">
         <div>
@@ -154,12 +215,21 @@ export default function AgentTransactionDetail() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
+          {canEdit && isDirty && (
+            <button className="btn btn-ghost" onClick={cancelChanges} disabled={saving}>Discard</button>
+          )}
+          {canEdit && (
+            <button className="btn btn-gold" onClick={save} disabled={saving || !isDirty}>
+              {saving ? 'Saving…' : 'Save Changes'}
+            </button>
+          )}
           <button className="btn btn-ghost" onClick={printStatement}>⎙ Print Commission Statement</button>
         </div>
       </div>
 
       {isCancelled && <div className="alert-bar danger">✕ Cancelled{txn.cancelled_reason ? ` — ${txn.cancelled_reason}` : ''}</div>}
-      {isClosed && <div className="alert-bar success">✓ Closed {txn.close_date} — commission locked</div>}
+      {isClosed && <div className="alert-bar success">✓ Closed {txn.close_date} — transaction locked, no changes allowed</div>}
+      {!canEdit && <div className="alert-bar" style={{background:'var(--surf)',color:'var(--txt2)',fontSize:12}}>This transaction is read-only. Contact your broker if changes are needed.</div>}
 
       <div className="tab-bar">
         {['deal', 'commission', 'parties', 'activity', ...(disb ? ['disbursement'] : [])].map(t => (
@@ -169,34 +239,120 @@ export default function AgentTransactionDetail() {
         ))}
       </div>
 
-      {/* DEAL TAB */}
+      {/* DEAL TAB — editable when canEdit */}
       {tab === 'deal' && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
         <div className="card">
           <div className="card-hdr"><span className="card-title">Property</span></div>
           <div className="card-body">
-            <InfoRow label="Address" value={txn.street_address} />
-            <InfoRow label="City / State / ZIP" value={`${txn.city || ''}, ${txn.state || ''} ${txn.zip || ''}`} />
-            <InfoRow label="Type" value={<span style={{ textTransform: 'capitalize' }}>{txn.type}</span>} />
-            <InfoRow label="Property Type" value={txn.property_type || '—'} />
-            <InfoRow label="MLS #" value={txn.mls_number || '—'} />
-            <InfoRow label="Mortgage Company" value={txn.mortgage_company || '—'} />
-          </div>
-        </div>
-        <div className="card">
-          <div className="card-hdr"><span className="card-title">Deal Terms & Dates</span></div>
-          <div className="card-body">
-            <InfoRow label="Sale Price" value={fmt$(txn.sale_price)} />
-            <InfoRow label="Commission Rate" value={`${txn.selling_commission_pct || 0}%`} />
-            <InfoRow label="Lead Source" value={txn.lead_source || '—'} />
-            <InfoRow label="Contract Date" value={txn.contract_acceptance_date || '—'} />
-            <InfoRow label="Est. Close Date" value={txn.estimated_close_date || '—'} />
-            <InfoRow label="Actual Close Date" value={txn.close_date || '—'} />
-            {txn.co_broke_company && <InfoRow label="Co-Broke Company" value={txn.co_broke_company} />}
-            {txn.outside_referral_company && <InfoRow label="Outside Referral" value={txn.outside_referral_company} />}
+            <div className="form-group">
+              <label className="form-label">Street Address <span className="req">*</span></label>
+              <input className="form-ctrl" value={txn.street_address || ''} disabled={!canEdit} onChange={e => f('street_address', e.target.value)} />
+            </div>
+            <div className="form-grid-3">
+              <div className="form-group">
+                <label className="form-label">City <span className="req">*</span></label>
+                <input className="form-ctrl" value={txn.city || ''} disabled={!canEdit} onChange={e => f('city', e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">State</label>
+                <input className="form-ctrl" value={txn.state || ''} disabled={!canEdit} onChange={e => f('state', e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">ZIP</label>
+                <input className="form-ctrl" value={txn.zip || ''} disabled={!canEdit} onChange={e => f('zip', e.target.value)} />
+              </div>
+            </div>
+            <div className="form-grid">
+              <div className="form-group">
+                <label className="form-label">Type</label>
+                <select className="form-ctrl" value={txn.type || 'selling'} disabled={!canEdit} onChange={e => f('type', e.target.value)}>
+                  {txTypes.map(t => <option key={t} value={t} style={{ textTransform: 'capitalize' }}>{t}</option>)}
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Property Type</label>
+                <select className="form-ctrl" value={txn.property_type || ''} disabled={!canEdit} onChange={e => f('property_type', e.target.value)}>
+                  <option value="">— Select —</option>
+                  {propTypes.map(p => <option key={p}>{p}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="form-grid">
+              <div className="form-group">
+                <label className="form-label">MLS #</label>
+                <input className="form-ctrl" value={txn.mls_number || ''} disabled={!canEdit} onChange={e => f('mls_number', e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Mortgage Company</label>
+                <select className="form-ctrl" value={txn.mortgage_company || 'Cash'} disabled={!canEdit} onChange={e => f('mortgage_company', e.target.value)}>
+                  {mortgageCos.map(m => <option key={m}>{m}</option>)}
+                </select>
+              </div>
+            </div>
           </div>
         </div>
 
-        {/* Co-agents, name only */}
+        <div className="card">
+          <div className="card-hdr"><span className="card-title">Deal Terms & Dates</span></div>
+          <div className="card-body">
+            <div className="form-grid">
+              <div className="form-group">
+                <label className="form-label">Sale Price</label>
+                <input className="form-ctrl" type="number" value={txn.sale_price || ''} disabled={!canEdit} onChange={e => f('sale_price', e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Commission %</label>
+                <input className="form-ctrl" type="number" step="0.1" value={txn.selling_commission_pct || ''} disabled={!canEdit} onChange={e => f('selling_commission_pct', e.target.value)} />
+              </div>
+            </div>
+            {Number(txn.sale_price) > 0 && Number(txn.selling_commission_pct) > 0 && (
+              <div style={{ padding: '10px 14px', background: 'var(--teal-lt)', borderRadius: 'var(--r)', marginBottom: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ color: 'var(--txt2)', fontSize: 12 }}>Total Gross Commission</span>
+                <span style={{ fontSize: 20, fontWeight: 800, color: 'var(--teal)' }}>
+                  {fmt$((Number(txn.sale_price) || 0) * ((Number(txn.selling_commission_pct) || 0) / 100))}
+                </span>
+              </div>
+            )}
+            <div className="form-group">
+              <label className="form-label">Lead Source</label>
+              <select className="form-ctrl" value={txn.lead_source || ''} disabled={!canEdit} onChange={e => f('lead_source', e.target.value)}>
+                <option value="">— Select —</option>
+                {leadSources.map(l => <option key={l}>{l}</option>)}
+              </select>
+            </div>
+            <div className="form-grid">
+              <div className="form-group">
+                <label className="form-label">Contract Date</label>
+                <input className="form-ctrl" type="date" value={txn.contract_acceptance_date || ''} disabled={!canEdit} onChange={e => f('contract_acceptance_date', e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Est. Close Date</label>
+                <input className="form-ctrl" type="date" value={txn.estimated_close_date || ''} disabled={!canEdit} onChange={e => f('estimated_close_date', e.target.value)} />
+              </div>
+            </div>
+            <div className="form-grid">
+              <div className="form-group">
+                <label className="form-label">Co-Broke Company</label>
+                <input className="form-ctrl" value={txn.co_broke_company || ''} disabled={!canEdit} onChange={e => f('co_broke_company', e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Co-Broke Agent</label>
+                <input className="form-ctrl" value={txn.co_broke_agent || ''} disabled={!canEdit} onChange={e => f('co_broke_agent', e.target.value)} />
+              </div>
+            </div>
+            <div className="form-grid">
+              <div className="form-group">
+                <label className="form-label">Outside Referral Company</label>
+                <input className="form-ctrl" value={txn.outside_referral_company || ''} disabled={!canEdit} onChange={e => f('outside_referral_company', e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Outside Referral Agent</label>
+                <input className="form-ctrl" value={txn.outside_referral_agent || ''} disabled={!canEdit} onChange={e => f('outside_referral_agent', e.target.value)} />
+              </div>
+            </div>
+          </div>
+        </div>
+
         {tas.length > 1 && <div className="card" style={{ gridColumn: '1 / span 2' }}>
           <div className="card-hdr"><span className="card-title">Agents on This Deal</span></div>
           <div className="card-body">
@@ -220,7 +376,7 @@ export default function AgentTransactionDetail() {
         </div>}
       </div>}
 
-      {/* COMMISSION TAB — agent's own breakdown only */}
+      {/* COMMISSION TAB — read-only preview */}
       {tab === 'commission' && <div>
         <div className="card">
           <div className="card-hdr">
@@ -267,18 +423,45 @@ export default function AgentTransactionDetail() {
         </div>
       </div>}
 
-      {/* PARTIES TAB */}
+      {/* PARTIES TAB — editable when canEdit */}
       {tab === 'parties' && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
         {['buyers', 'sellers'].map(side => (
           <div className="card" key={side}>
-            <div className="card-hdr"><span className="card-title">{side === 'buyers' ? 'Buyers' : 'Sellers'}</span></div>
+            <div className="card-hdr">
+              <span className="card-title">{side === 'buyers' ? 'Buyers' : 'Sellers'}</span>
+              {canEdit && <button className="btn btn-ghost btn-sm" onClick={() => addParty(side)}>+ Add</button>}
+            </div>
             <div className="card-body">
               {(txn[side] || []).length === 0 && <div style={{ color: 'var(--txt3)', fontSize: 12 }}>None entered.</div>}
               {(txn[side] || []).map((p, i) => (
                 <div key={i} style={{ paddingBottom: 12, marginBottom: 12, borderBottom: i < (txn[side] || []).length - 1 ? '1px solid var(--bdr)' : 'none' }}>
-                  <div style={{ fontWeight: 600 }}>{p.name || '—'}</div>
-                  {p.phone && <div style={{ fontSize: 12, color: 'var(--txt3)' }}>{p.phone}</div>}
-                  {p.email && <div style={{ fontSize: 12, color: 'var(--txt3)' }}>{p.email}</div>}
+                  {canEdit ? (
+                    <>
+                      <div className="form-grid" style={{ marginBottom: 8 }}>
+                        <div className="form-group" style={{ marginBottom: 0 }}>
+                          <label className="form-label">Name</label>
+                          <input className="form-ctrl" value={p.name || ''} onChange={e => updParty(side, i, 'name', e.target.value)} />
+                        </div>
+                        <div className="form-group" style={{ marginBottom: 0 }}>
+                          <label className="form-label">Phone</label>
+                          <input className="form-ctrl" value={p.phone || ''} onChange={e => updParty(side, i, 'phone', e.target.value)} />
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+                        <div className="form-group" style={{ marginBottom: 0, flex: 1 }}>
+                          <label className="form-label">Email</label>
+                          <input className="form-ctrl" value={p.email || ''} onChange={e => updParty(side, i, 'email', e.target.value)} />
+                        </div>
+                        <button className="btn btn-ghost btn-sm" style={{ color: 'var(--red)' }} onClick={() => delParty(side, i)}>✕</button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ fontWeight: 600 }}>{p.name || '—'}</div>
+                      {p.phone && <div style={{ fontSize: 12, color: 'var(--txt3)' }}>{p.phone}</div>}
+                      {p.email && <div style={{ fontSize: 12, color: 'var(--txt3)' }}>{p.email}</div>}
+                    </>
+                  )}
                 </div>
               ))}
             </div>
@@ -341,16 +524,6 @@ export default function AgentTransactionDetail() {
           </div>
         </div>
       </div>}
-    </div>
-  )
-}
-
-// small helper component for label/value rows on the deal tab
-function InfoRow({ label, value }) {
-  return (
-    <div style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid var(--bdr)', fontSize: 13 }}>
-      <span style={{ color: 'var(--txt3)' }}>{label}</span>
-      <span style={{ fontWeight: 500, textAlign: 'right' }}>{value || '—'}</span>
     </div>
   )
 }
