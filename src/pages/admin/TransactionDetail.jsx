@@ -225,7 +225,9 @@ export default function TransactionDetail() {
       const ao = agents.find(a=>a.id===ta.agent_id)||ta.agents
       const vol = (Number(txn.sale_price)||0)*((Number(ta.volume_pct)||0)/100)
       const agentName = (ao?.first_name||'') + ' ' + (ao?.last_name||'')
-      const adminRow = comm.admin_fee > 0
+      const adminRow = comm.admin_fee_payer === 'waived'
+        ? '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;font-style:italic;">Admin Fee (Waived)</td><td style="padding:7px 0;border-bottom:1px solid #eee;color:#888;text-align:right;font-style:italic;">' + fp(0) + '</td></tr>'
+        : comm.admin_fee > 0
         ? '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;">Admin Fee (' + comm.admin_fee_payer + ' pays)</td><td style="padding:7px 0;border-bottom:1px solid #eee;color:#888;text-align:right;">' + (comm.admin_fee_payer==='agent'?'-':'+') + fp(comm.admin_fee) + '</td></tr>'
         : ''
       lines += '<div style="margin-bottom:32px;border:1px solid #ddd;border-radius:8px;overflow:hidden;">'
@@ -350,7 +352,7 @@ export default function TransactionDetail() {
             {gross>0&&<div style={{padding:'10px 14px',background:'var(--teal-lt)',borderRadius:'var(--r)',marginBottom:14,display:'flex',justifyContent:'space-between',alignItems:'center'}}><span style={{color:'var(--txt2)',fontSize:12}}>Gross Commission</span><span style={{fontSize:20,fontWeight:800,color:'var(--teal)'}}>{fmt$(gross)}</span></div>}
             <div className="form-grid">
               <div className="form-group"><label className="form-label">Lead Source</label><select className="form-ctrl" value={txn.lead_source||''} disabled={isClosed} onChange={e=>f('lead_source',e.target.value)}><option value="">— Select —</option>{(settings?.lead_sources||[]).map(l=><option key={l}>{l}</option>)}</select></div>
-              <div className="form-group"><label className="form-label">Admin Fee Payer</label><select className="form-ctrl" value={txn.admin_fee_payer} disabled={isClosed} onChange={e=>f('admin_fee_payer',e.target.value)}><option value="client">Client</option><option value="agent">Agent</option><option value="broker">Broker</option></select></div>
+              <div className="form-group"><label className="form-label">Admin Fee Payer</label><select className="form-ctrl" value={txn.admin_fee_payer} disabled={isClosed} onChange={e=>f('admin_fee_payer',e.target.value)}><option value="client">Client</option><option value="agent">Agent</option><option value="broker">Broker</option><option value="waived">Waived</option></select></div>
             </div>
             <div className="form-grid">
               <div className="form-group"><label className="form-label">Contract Date</label><input className="form-ctrl" type="date" value={txn.contract_acceptance_date||''} disabled={isClosed} onChange={e=>f('contract_acceptance_date',e.target.value)}/></div>
