@@ -55,8 +55,9 @@ export function calcCommission(txn, ta, plan, brokerPaidYTD = 0, isPrimary = tru
 
   // --- Admin fee --- only charged once per transaction (primary agent only)
   const feeItem = (plan.fees || []).find(f => f.name === 'Admin Fee')
-  const adminFee = isPrimary ? (feeItem?.amt || 0) : 0
   const adminFeePayer = ta?.locked_admin_fee_payer || txn.admin_fee_payer || feeItem?.payer || 'client'
+  // When waived, admin fee is $0 regardless of plan amount
+  const adminFee = (adminFeePayer === 'waived') ? 0 : (isPrimary ? (feeItem?.amt || 0) : 0)
 
   // --- Determine agent split % ---
   let agentPct = 100
@@ -101,6 +102,8 @@ export function calcCommission(txn, ta, plan, brokerPaidYTD = 0, isPrimary = tru
   }
 
   // Apply admin fee payer adjustments
+  // 'waived' = $0 fee, no adjustment to anyone's share
+  // 'client' = added to gross, no impact on agent or broker shares
   if (adminFeePayer === 'agent') {
     agentNet -= adminFee
   } else if (adminFeePayer === 'broker') {
