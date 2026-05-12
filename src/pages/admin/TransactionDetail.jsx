@@ -112,24 +112,216 @@ export default function TransactionDetail() {
     const d={...txn,sale_price:txn.sale_price?Number(txn.sale_price):null,selling_commission_pct:txn.selling_commission_pct?Number(txn.selling_commission_pct):null,contract_acceptance_date:txn.contract_acceptance_date||null,estimated_close_date:txn.estimated_close_date||null,close_date:txn.close_date||null}
     if(isNew){const{data,error}=await supabase.from('transactions').insert(d).select().single();if(error){alert(error.message);setSaving(false);return};tid=data.id}
     else await supabase.from('transactions').update(d).eq('id',tid)
-    await supabase.from('transaction_agents').delete().eq('transaction_id',tid)
-    await supabase.from('transaction_agents').insert(tas.map((ta,i)=>({transaction_id:tid,agent_id:ta.agent_id,split_type:ta.split_type,split_value:Number(ta.split_value)||0,volume_pct:Number(ta.volume_pct)||0,plan_id:ta.plan_id||null,sort_order:i})))
+
+    // ── PATCH 1: Non-destructive sync of transaction_agents rows. ───────
+    // Existing rows by id → UPDATE (preserves locked_* values on closed deals).
+    // New rows (no id, marked _new) → INSERT.
+    // Rows that existed before but are no longer in `tas` → DELETE.
+    const { data: existingRows } = await supabase.from('transaction_agents').select('id').eq('transaction_id', tid)
+    const existingIds = new Set((existingRows || []).map(r => r.id))
+    const keptIds = new Set(tas.filter(ta => ta.id).map(ta => ta.id))
+
+    // DELETE rows that were removed in the UI
+    for (const oldId of existingIds) {
+      if (!keptIds.has(oldId)) {
+        await supabase.from('transaction_agents').delete().eq('id', oldId)
+      }
+    }
+
+    // UPDATE existing rows, INSERT new ones
+    for (let i = 0; i < tas.length; i++) {
+      const ta = tas[i]
+      const row = {
+        transaction_id: tid,
+        agent_id: ta.agent_id,
+        split_type: ta.split_type,
+        split_value: Number(ta.split_value) || 0,
+        volume_pct: Number(ta.volume_pct) || 0,
+        plan_id: ta.plan_id || null,
+        sort_order: i,
+      }
+      if (ta.id && existingIds.has(ta.id)) {
+        await supabase.from('transaction_agents').update(row).eq('id', ta.id)
+      } else {
+        await supabase.from('transaction_agents').insert(row)
+      }
+    }
+
+    // ── PATCH 2: Re-lock closed deals when admin edits financial inputs ──
+    // If this is a closed deal and the admin/broker just edited it, refresh
+    // the locked_* values so they reflect the new price, %, splits, or plans.
+    // This is the ONLY time locked values change on a closed deal.
+    if (!isNew && txn.status === 'closed' && isBroker) {
+      // Reload tas with fresh ids before re-locking
+      const { data: freshTas } = await supabase
+        .from('transaction_agents')
+        .select('*,agents(id,first_name,last_name),plans(*)')
+        .eq('transaction_id', tid)
+        .order('sort_order')
+
+      // Fetch fresh broker_paid_ytd for each agent, EXCLUDING this deal itself
+      const yr = new Date(txn.close_date).getFullYear()
+      for (let i = 0; i < (freshTas || []).length; i++) {
+        const ta = freshTas[i]
+        const { data: priorRows } = await supabase
+          .from('transaction_agents')
+          .select('locked_broker_net,transactions!inner(status,close_date,id)')
+          .eq('agent_id', ta.agent_id)
+          .eq('transactions.status', 'closed')
+          .neq('transactions.id', tid)
+        const priorYtd = (priorRows || [])
+          .filter(r => new Date(r.transactions?.close_date).getFullYear() === yr)
+          .reduce((s, r) => s + (r.locked_broker_net || 0), 0)
+
+        const plan = ta.plan_id
+          ? (plans.find(p => p.id === ta.plan_id) || ta.plans)
+          : (agents.find(a => a.id === ta.agent_id)?.plans || ta.plans)
+
+        if (!plan) {
+          alert(`Re-lock skipped for agent in row ${i + 1}: no commission plan found.`)
+          continue
+        }
+
+        const c = calcCommission(
+          { ...txn, sale_price: Number(txn.sale_price), selling_commission_pct: Number(txn.selling_commission_pct) },
+          ta, plan, priorYtd, i === 0
+        )
+        const required = ['gross', 'pct', 'agent_gross', 'agent_net', 'broker_net']
+        const bad = required.find(k => c[k] === null || c[k] === undefined || !Number.isFinite(Number(c[k])))
+        if (bad) {
+          alert(`Re-lock failed for agent in row ${i + 1}: invalid ${bad}.`)
+          continue
+        }
+
+        const { error } = await supabase.from('transaction_agents').update({
+          locked_gross:           c.gross,
+          locked_agent_pct:       c.pct,
+          locked_agent_gross:     c.agent_gross,
+          locked_agent_net:       c.agent_net,
+          locked_broker_net:      c.broker_net,
+          locked_admin_fee:       c.admin_fee,
+          locked_admin_fee_payer: c.admin_fee_payer,
+        }).eq('id', ta.id)
+        if (error) {
+          alert(`Re-lock save failed for agent in row ${i + 1}: ${error.message}`)
+        }
+      }
+    }
+
     setSaving(false)
     if(isNew)navigate(`/transactions/${tid}`)
     else await loadTxn()
   }
 
+  // ── PATCH 3: Bulletproof close — validate first, compute, write atomically ──
   async function closeTransaction() {
-    const cd=window.prompt('Close date (YYYY-MM-DD):',new Date().toISOString().slice(0,10))
-    if(!cd)return
-    for(const ta of tas) {
-      const plan=getPlan(ta); const ytd=ytdMap[ta.agent_id]||0
-      const c=calcCommission(txn,ta,plan,ytd,tas.indexOf(ta)===0)
-      await supabase.from('transaction_agents').update({locked_gross:c.gross,locked_agent_pct:c.pct,locked_agent_gross:c.agent_gross,locked_agent_net:c.agent_net,locked_broker_net:c.broker_net,locked_admin_fee:c.admin_fee,locked_admin_fee_payer:c.admin_fee_payer}).eq('id',ta.id)
+    const cd = window.prompt('Close date (YYYY-MM-DD):', new Date().toISOString().slice(0,10))
+    if (!cd) return
+
+    // Pre-flight validation
+    if (!txn.sale_price || Number(txn.sale_price) <= 0) {
+      alert('Cannot close: sale price must be greater than zero.')
+      return
     }
-    await supabase.from('transactions').update({status:'closed',close_date:cd,locked_at:new Date().toISOString()}).eq('id',id)
-    if(!disbs.find(d=>d.agent_id===null)) await supabase.from('disbursements').insert({transaction_id:id,agent_id:null,paid:false})
-    await loadTxn(); setTab('disbursement')
+    if (!txn.selling_commission_pct || Number(txn.selling_commission_pct) <= 0) {
+      alert('Cannot close: commission % must be greater than zero.')
+      return
+    }
+    if (tas.length === 0) {
+      alert('Cannot close: at least one agent is required.')
+      return
+    }
+    if (tas.some(ta => !ta.agent_id)) {
+      alert('Cannot close: every agent row must have an agent selected.')
+      return
+    }
+    if (tas.some(ta => !ta.id)) {
+      alert('Cannot close: please Save the transaction before closing it.')
+      return
+    }
+    const totalSplit = tas.reduce((s, ta) => s + Number(ta.split_value || 0), 0)
+    if (tas.length > 1 && tas[0].split_type === 'percent' && Math.abs(totalSplit - 100) > 0.01) {
+      alert(`Cannot close: agent splits total ${totalSplit}% — must equal 100%.`)
+      return
+    }
+
+    // Fetch fresh YTD for every agent (exclude this deal itself)
+    const freshYtd = {}
+    const yr = new Date(cd).getFullYear()
+    for (const ta of tas) {
+      const { data, error } = await supabase
+        .from('transaction_agents')
+        .select('locked_broker_net,transactions!inner(status,close_date,id)')
+        .eq('agent_id', ta.agent_id)
+        .eq('transactions.status', 'closed')
+        .neq('transactions.id', id)
+      if (error) {
+        alert(`Cannot close: failed to load cap progress for an agent. ${error.message}`)
+        return
+      }
+      freshYtd[ta.agent_id] = (data || [])
+        .filter(r => new Date(r.transactions?.close_date).getFullYear() === yr)
+        .reduce((s, r) => s + (r.locked_broker_net || 0), 0)
+    }
+
+    // Compute all locked values up front; abort if anything invalid
+    const computed = []
+    for (let i = 0; i < tas.length; i++) {
+      const ta = tas[i]
+      const plan = getPlan(ta)
+      if (!plan) {
+        alert(`Cannot close: no commission plan found for agent in row ${i + 1}. Set a plan override or assign a default plan to that agent.`)
+        return
+      }
+      const c = calcCommission(
+        { ...txn, sale_price: Number(txn.sale_price), selling_commission_pct: Number(txn.selling_commission_pct) },
+        ta, plan, freshYtd[ta.agent_id] || 0, i === 0
+      )
+      const required = ['gross', 'pct', 'agent_gross', 'agent_net', 'broker_net']
+      for (const k of required) {
+        if (c[k] === null || c[k] === undefined || !Number.isFinite(Number(c[k]))) {
+          alert(`Cannot close: commission calculation produced an invalid ${k} for row ${i + 1}. Check sale price, commission %, plan, and agent split values.`)
+          return
+        }
+      }
+      computed.push({ ta, c })
+    }
+
+    // Write locked values; abort the whole close on any error
+    for (const { ta, c } of computed) {
+      const { error } = await supabase.from('transaction_agents').update({
+        locked_gross:           c.gross,
+        locked_agent_pct:       c.pct,
+        locked_agent_gross:     c.agent_gross,
+        locked_agent_net:       c.agent_net,
+        locked_broker_net:      c.broker_net,
+        locked_admin_fee:       c.admin_fee,
+        locked_admin_fee_payer: c.admin_fee_payer,
+      }).eq('id', ta.id)
+      if (error) {
+        alert(`Failed to lock commission for an agent: ${error.message}\n\nTransaction NOT closed. Fix the error and try again.`)
+        return
+      }
+    }
+
+    // Only now flip status to closed
+    const { error: statusError } = await supabase.from('transactions').update({
+      status: 'closed',
+      close_date: cd,
+      locked_at: new Date().toISOString(),
+    }).eq('id', id)
+    if (statusError) {
+      alert(`Locked agent commissions but failed to flip status to closed: ${statusError.message}\n\nContact admin — manual cleanup required.`)
+      return
+    }
+
+    // Create combined disbursement if not already present
+    if (!disbs.find(d => d.agent_id === null)) {
+      await supabase.from('disbursements').insert({ transaction_id: id, agent_id: null, paid: false })
+    }
+
+    await loadTxn()
+    setTab('disbursement')
   }
 
   async function genIndivDisb(agentId) {
