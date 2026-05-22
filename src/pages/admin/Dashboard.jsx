@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
-import { fmt$, licenseStatus, statusBadge, getCapProgress } from '../../lib/commission'
+import { fmt$, licenseStatus, statusBadge, getCapProgress, filterRowsToCapWindow, formatCapWindow } from '../../lib/commission'
 
 export default function Dashboard() {
   const navigate = useNavigate()
@@ -12,7 +12,6 @@ export default function Dashboard() {
 
   async function load() {
     const thisYear = new Date().getFullYear()
-    const yearStart = `${thisYear}-01-01`
 
     const [txns, agents, disbs, plans] = await Promise.all([
       supabase.from('transactions').select('*, transaction_agents(*)'),
@@ -39,7 +38,7 @@ export default function Dashboard() {
   const active = transactions.filter(t => t.status === 'active')
   const pending = transactions.filter(t => t.status === 'pending')
 
-  // YTD GCI
+  // YTD GCI — still calendar year, since this is a brokerage-wide metric, not per-agent cap
   const ytdClosed = closed.filter(t => t.close_date && new Date(t.close_date).getFullYear() === thisYear)
   const ytdGCI = ytdClosed.reduce((s, t) =>
     s + (t.sale_price || 0) * ((t.selling_commission_pct || 0) / 100), 0)
@@ -93,33 +92,49 @@ export default function Dashboard() {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
-        {/* Cap Progress */}
+        {/* Cap Progress — windowed per agent's plan rollover */}
         <div className="card">
           <div className="card-hdr">
-            <span className="card-title">Cap Progress {thisYear}</span>
+            <span className="card-title">Cap Progress</span>
           </div>
           <div className="card-body" style={{ padding: 0 }}>
             {capAgents.length === 0 && (
               <div style={{ padding: 20, color: 'var(--txt3)', fontSize: 12 }}>No agents on cap plans.</div>
             )}
             {capAgents.map(agent => {
-              const closedRows = transactions
-                .filter(t => t.status === 'closed' && t.close_date && new Date(t.close_date).getFullYear() === thisYear)
-                .flatMap(t => (t.transaction_agents || []).filter(ta => ta.agent_id === agent.id))
-              const cp = getCapProgress(closedRows, agent.plans?.cap_amount)
+              const plan = agent.plans
+              if (!plan) return null
+
+              // Build agent's transaction_agents rows with their parent transactions,
+              // so we can use filterRowsToCapWindow exactly like the other pages.
+              const allRows = transactions.flatMap(t =>
+                (t.transaction_agents || [])
+                  .filter(ta => ta.agent_id === agent.id)
+                  .map(ta => ({ ...ta, transactions: t }))
+              )
+              const rowsInWindow = filterRowsToCapWindow(allRows, plan, agent, new Date())
+              const cp = getCapProgress(rowsInWindow, plan.cap_amount)
               if (!cp) return null
+
+              const windowLabel = formatCapWindow(plan, agent, new Date())
+
               return (
                 <div
                   key={agent.id}
                   style={{ padding: '12px 16px', borderBottom: '1px solid var(--bdr)', cursor: 'pointer' }}
                   onClick={() => navigate(`/agents/${agent.id}`)}
                 >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
                     <span style={{ fontWeight: 600 }}>{agent.first_name} {agent.last_name}</span>
                     <span style={{ fontSize: 11, color: cp.hit ? 'var(--gold)' : 'var(--txt3)' }}>
-                      {cp.hit ? '🎯 Capped' : `${fmt$(cp.remaining)} remaining`}
+                      {cp.overage > 0
+                        ? `🎯 Capped + ${fmt$(cp.overage)} over`
+                        : cp.hit
+                          ? '🎯 Capped'
+                          : `${fmt$(cp.remaining)} remaining`}
                     </span>
                   </div>
+                  <div style={{ fontSize: 10, color: 'var(--txt3)', marginBottom: 6 }}>{windowLabel}</div>
                   <div className="prog-wrap">
                     <div className={`prog-bar${cp.hit ? ' capped' : ''}`} style={{ width: `${cp.pct}%` }} />
                   </div>
