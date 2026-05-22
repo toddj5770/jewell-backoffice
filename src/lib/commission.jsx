@@ -122,18 +122,33 @@ export function calcCommission(txn, ta, plan, brokerPaidYTD = 0, isPrimary = tru
 }
 
 /**
- * Get cap progress for an agent from their closed transaction_agents rows
+ * Get cap progress for an agent from their closed transaction_agents rows.
+ * Callers should pre-filter `closedRows` to the current cap window using
+ * filterRowsToCapWindow().
+ *
+ * Returns an object that exposes BOTH the actual paid total (which may
+ * exceed the cap on a straddle deal) AND a clamped value for progress bars.
+ *
+ * - paid:         true total paid this period (CAN exceed cap)
+ * - paid_clamped: paid capped at capAmount (for progress bars)
+ * - overage:      max(0, paid - cap) — how much over the cap they went
+ * - cap:          the cap amount
+ * - remaining:    max(0, cap - paid) — how much room is left
+ * - pct:          paid as a % of cap, capped at 100 (for progress bars)
+ * - hit:          whether they've reached or passed the cap
  */
 export function getCapProgress(closedRows, capAmount) {
   if (!capAmount) return null
   const paid = closedRows.reduce((s, r) => s + (r.locked_broker_net || 0), 0)
   const capped = Math.min(paid, capAmount)
   return {
-    paid: capped,
-    cap: capAmount,
-    remaining: Math.max(0, capAmount - capped),
-    pct: Math.min(100, (capped / capAmount) * 100),
-    hit: paid >= capAmount,
+    paid:         paid,
+    paid_clamped: capped,
+    cap:          capAmount,
+    remaining:    Math.max(0, capAmount - paid),
+    overage:      Math.max(0, paid - capAmount),
+    pct:          Math.min(100, capAmount > 0 ? (paid / capAmount) * 100 : 0),
+    hit:          paid >= capAmount,
   }
 }
 
@@ -182,11 +197,14 @@ export function statusBadge(status) {
 // loadBrokerPaidYTD does the Supabase query against that window and
 // returns the sum of locked_broker_net.
 //
+// filterRowsToCapWindow is for cases where the caller already has the
+// transaction_agents rows in memory (Dashboard, AgentDashboard, AgentDetail)
+// and just needs to filter to the current cap window.
+//
 // Defensive behavior: if any required date is missing (e.g. agent has
 // no start_date but plan is rollover_type='start_date'), falls back to
 // calendar_year with a console.warn so the page still works and the
 // missing data is visible to the developer.
-//
 
 /**
  * Compute the cap rollover window for a plan + agent at a given date.
@@ -206,7 +224,6 @@ export function computeCapWindow(plan, agent, asOf) {
   const rolloverType = plan?.rollover_type || 'calendar_year'
 
   // Helper: the most recent occurrence of (month, day) on or before asOfDate.
-  // Returns Date. Handles year boundaries.
   function lastAnniversaryOnOrBefore(month /* 0-11 */, day, refDate) {
     const y = refDate.getFullYear()
     let candidate = new Date(y, month, day)
@@ -232,7 +249,7 @@ export function computeCapWindow(plan, agent, asOf) {
         return computeCapWindow({ ...plan, rollover_type: 'calendar_year' }, agent, asOfDate)
       }
       const anniv = lastAnniversaryOnOrBefore(start.getMonth(), start.getDate(), asOfDate)
-      const windowEnd = new Date(addYears(anniv, 1).getTime() - 1) // one second before next anniversary
+      const windowEnd = new Date(addYears(anniv, 1).getTime() - 1)
       return { windowStart: anniv, windowEnd, rolloverType }
     }
 
@@ -260,14 +277,12 @@ export function computeCapWindow(plan, agent, asOf) {
 
     case 'rolling':
     case 'rolling_rollover': {
-      // Trailing 12 months ending at asOfDate
       const windowEnd = asOfDate
       const windowStart = new Date(asOfDate.getFullYear() - 1, asOfDate.getMonth(), asOfDate.getDate() + 1)
       return { windowStart, windowEnd, rolloverType: 'rolling' }
     }
 
     case 'none': {
-      // No reset, ever. Use a very-distant start (Unix epoch) and asOfDate as end.
       return { windowStart: new Date(0), windowEnd: asOfDate, rolloverType }
     }
 
@@ -280,15 +295,69 @@ export function computeCapWindow(plan, agent, asOf) {
 }
 
 /**
+ * Format a cap window for display in a UI subtitle.
+ * Example: "Mar 15, 2026 – Mar 14, 2027"
+ */
+export function formatCapWindow(plan, agent, asOf = new Date()) {
+  const { windowStart, windowEnd } = computeCapWindow(plan, agent, asOf)
+  const opts = { month: 'short', day: 'numeric', year: 'numeric' }
+  return windowStart.toLocaleDateString('en-US', opts) + ' – ' + windowEnd.toLocaleDateString('en-US', opts)
+}
+
+/**
+ * Filter a pre-loaded list of transaction_agent rows down to only those
+ * whose linked transaction.close_date falls inside the agent's current
+ * cap window for the given plan.
+ *
+ * Each row must include nested `transactions.close_date` and `transactions.status`.
+ * Only rows with status='closed' AND close_date inside the window pass through.
+ *
+ * Use this on Dashboard / AgentDashboard / AgentDetail where the rows are
+ * already in memory and you want to compute cap progress without an extra
+ * Supabase round-trip.
+ */
+export function filterRowsToCapWindow(rows, plan, agent, asOf = new Date()) {
+  if (!rows || rows.length === 0) return []
+  const { windowStart, windowEnd } = computeCapWindow(plan, agent, asOf)
+  return rows.filter(r => {
+    const t = r.transactions
+    if (!t) return false
+    if (t.status !== 'closed') return false
+    if (!t.close_date) return false
+    const d = new Date(t.close_date)
+    return d >= windowStart && d <= windowEnd
+  })
+}
+
+/**
+ * Sum an agent's net commission YTD across a pre-filtered list of rows.
+ * Reads locked_agent_net when present (the immutable, correct value for
+ * closed deals). Falls back to calcCommission for any row that's not
+ * locked (shouldn't happen for closed deals, but degrades safely).
+ */
+export function sumAgentNetYTD(rows) {
+  if (!rows) return 0
+  return rows.reduce((s, ta) => {
+    if (ta.locked_agent_net !== null && ta.locked_agent_net !== undefined) {
+      return s + Number(ta.locked_agent_net || 0)
+    }
+    // Fallback for rows missing locked values (defensive — closed deals
+    // should always have them)
+    const t = ta.transactions
+    if (!t) return s
+    const c = calcCommission(t, ta, ta.plans || null, 0, true)
+    return s + (c?.agent_net || 0)
+  }, 0)
+}
+
+/**
  * Load the broker_paid total for an agent over their plan's current cap window.
  * @param {object}  supabase     - supabase client
  * @param {string}  agentId      - the agent's UUID
  * @param {object}  plan         - plan record (provides rollover_type and rollover_date)
  * @param {object}  agent        - agent record (provides start_date)
  * @param {Date|string} asOf     - date to evaluate the window around (default: now)
- * @param {string?} excludeTxnId - optional transaction id to exclude (used when re-locking
- *                                 the current transaction so it doesn't count toward its own
- *                                 YTD)
+ * @param {string?} excludeTxnId - optional transaction id to exclude
  * @returns {Promise<number>}    - total locked_broker_net for closed deals in window
  */
 export async function loadBrokerPaidYTD(supabase, agentId, plan, agent, asOf = new Date(), excludeTxnId = null) {
