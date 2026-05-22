@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
-import { fmt$, licenseStatus, statusBadge, getCapProgress } from '../../lib/commission'
+import { fmt$, licenseStatus, statusBadge, getCapProgress, filterRowsToCapWindow, formatCapWindow } from '../../lib/commission'
 
 const EMPTY = {first_name:'',last_name:'',email:'',phone_mobile:'',office:'',status:'active',start_date:'',plan_id:'',license_number:'',license_type:'salesperson',license_state:'TN',license_expiration:'',eando_expiration:'',mls_id:'',w9_on_file:false,onboard_status:'not_started'}
 
@@ -60,10 +60,11 @@ export default function AgentDetail() {
   if(loading) return <div className="loading"><div className="spinner"/>Loading…</div>
 
   const ls = licenseStatus(agent.license_expiration)
-  const thisYear = new Date().getFullYear()
-  const closedRows = txnAgents.filter(ta=>ta.transactions?.status==='closed'&&new Date(ta.transactions.close_date).getFullYear()===thisYear)
-  const plan = plans.find(p=>p.id===agent.plan_id)
-  const cp = plan?.type==='cap' ? getCapProgress(closedRows, plan.cap_amount) : null
+  const plan = plans.find(p => p.id === agent.plan_id)
+  // Use rollover-aware window instead of calendar year
+  const rowsInWindow = plan ? filterRowsToCapWindow(txnAgents, plan, agent, new Date()) : []
+  const cp = plan?.type === 'cap' ? getCapProgress(rowsInWindow, plan.cap_amount) : null
+  const windowLabel = plan ? formatCapWindow(plan, agent, new Date()) : ''
 
   return (
     <div>
@@ -118,12 +119,13 @@ export default function AgentDetail() {
       </div>
 
       {cp&&!isNew&&<div className="card" style={{marginBottom:18}}>
-        <div className="card-hdr"><span className="card-title">Cap Progress {thisYear}</span></div>
+        <div className="card-hdr"><span className="card-title">Cap Progress</span></div>
         <div className="card-body">
-          <div style={{display:'flex',justifyContent:'space-between',marginBottom:8}}><span style={{color:'var(--txt3)',fontSize:12}}>Broker Paid YTD</span><strong>{fmt$(cp.paid)}</strong></div>
+          <div style={{fontSize:11,color:'var(--txt3)',marginBottom:10}}>{windowLabel}</div>
+          <div style={{display:'flex',justifyContent:'space-between',marginBottom:8}}><span style={{color:'var(--txt3)',fontSize:12}}>Broker Paid This Period</span><strong>{fmt$(cp.paid)}</strong></div>
           <div className="prog-wrap" style={{marginBottom:8}}><div className={`prog-bar${cp.hit?' capped':''}`} style={{width:`${cp.pct}%`}}/></div>
           <div style={{display:'flex',justifyContent:'space-between',fontSize:11,color:'var(--txt3)'}}><span>{fmt$(0)}</span><span>Cap: {fmt$(cp.cap)}</span></div>
-          {cp.hit&&<div className="alert-bar success" style={{marginTop:12}}>🎯 Cap hit! Agent is at 100% split.</div>}
+          {cp.hit&&<div className="alert-bar success" style={{marginTop:12}}>🎯 Cap hit! Agent is at 100% split.{cp.overage>0&&<> ({fmt$(cp.overage)} over)</>}</div>}
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginTop:12}}>
             <div style={{textAlign:'center',padding:10,background:'var(--teal-lt)',borderRadius:'var(--r)'}}><div style={{fontSize:18,fontWeight:700,color:'var(--teal)'}}>{fmt$(cp.paid)}</div><div style={{fontSize:10,color:'var(--txt3)'}}>Paid to Broker</div></div>
             <div style={{textAlign:'center',padding:10,background:'var(--surf)',borderRadius:'var(--r)'}}><div style={{fontSize:18,fontWeight:700,color:'var(--navy)'}}>{fmt$(cp.remaining)}</div><div style={{fontSize:10,color:'var(--txt3)'}}>Remaining</div></div>
