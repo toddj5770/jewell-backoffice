@@ -500,16 +500,38 @@ export default function TransactionDetail() {
       // Strip the print button from the HTML before converting to PDF
       const pdfHtml = built.html.replace(/<div class="no-print"[\s\S]*?<\/div>\s*<\/body>/, '</body>')
 
-      // Render the HTML offscreen so html2pdf can process it
+      // Extract body contents to inject into our container
+      const bodyMatch = pdfHtml.match(/<body[^>]*>([\s\S]*?)<\/body>/i)
+      const bodyInner = bodyMatch ? bodyMatch[1] : pdfHtml
+
+      // Build a visible-but-offscreen container with the body styles re-applied.
+      // We position at top:0 left:0 (not -99999px) because html2canvas can
+      // collapse far-offscreen elements to zero size. We hide via z-index:-1
+      // and opacity:0 so the user doesn't see a flash, but layout is real.
       hiddenContainer = document.createElement('div')
       hiddenContainer.style.position = 'fixed'
-      hiddenContainer.style.left = '-99999px'
       hiddenContainer.style.top = '0'
+      hiddenContainer.style.left = '0'
       hiddenContainer.style.width = '800px'
-      // Extract just the <body> contents — html2pdf renders the element we hand it
-      const bodyMatch = pdfHtml.match(/<body[^>]*>([\s\S]*?)<\/body>/i)
-      hiddenContainer.innerHTML = bodyMatch ? bodyMatch[1] : pdfHtml
+      hiddenContainer.style.background = '#ffffff'
+      hiddenContainer.style.padding = '32px'
+      hiddenContainer.style.fontFamily = 'Segoe UI, system-ui, sans-serif'
+      hiddenContainer.style.fontSize = '13px'
+      hiddenContainer.style.color = '#1a1a1a'
+      hiddenContainer.style.zIndex = '-1'
+      hiddenContainer.style.opacity = '0'
+      hiddenContainer.style.pointerEvents = 'none'
+      hiddenContainer.innerHTML = bodyInner
       document.body.appendChild(hiddenContainer)
+
+      // Give the browser two paint cycles so layout is computed before capture
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+
+      // Sanity-check: if the container has no height, html2canvas will produce a blank PDF
+      if (hiddenContainer.offsetHeight === 0) {
+        alert('Could not render the statement for PDF conversion. Please try again or use Print instead.')
+        return
+      }
 
       // Convert to PDF blob
       const pdfBlob = await html2pdf()
@@ -517,12 +539,18 @@ export default function TransactionDetail() {
           margin: 10,
           filename: `Commission Statement - ${built.propertyAddress || 'Statement'}.pdf`,
           image: { type: 'jpeg', quality: 0.95 },
-          html2canvas: { scale: 2, useCORS: true },
+          html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
           jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' },
         })
         .from(hiddenContainer)
         .toPdf()
         .output('blob')
+
+      // Sanity-check the PDF blob size — anything under ~2KB is almost certainly blank
+      if (!pdfBlob || pdfBlob.size < 2000) {
+        alert(`PDF generated but appears empty (${pdfBlob?.size||0} bytes). Email not sent.`)
+        return
+      }
 
       // Base64-encode the blob (without the data:... prefix)
       const pdf_base64 = await new Promise((resolve, reject) => {
