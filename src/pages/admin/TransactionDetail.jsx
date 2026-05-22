@@ -484,6 +484,10 @@ export default function TransactionDetail() {
   }
 
   // ── Email a single agent's commission statement as a PDF attachment ──
+  // Strategy: render the full HTML document inside a hidden iframe (NOT a
+  // div), then run html2pdf against the iframe's body. Iframes give
+  // html2canvas a clean, isolated rendering context where flex layouts,
+  // tables, and inline styles all behave correctly.
   async function emailDisbursement(agentId) {
     const ao = agents.find(a=>a.id===agentId) || tas.find(t=>t.agent_id===agentId)?.agents
     if (!ao) { alert('Agent not found'); return }
@@ -495,58 +499,75 @@ export default function TransactionDetail() {
     if (!window.confirm(`Email commission statement for ${built.propertyAddress || 'this transaction'} to ${ao.first_name} ${ao.last_name} (${ao.email})?`)) return
 
     setEmailingAgent(agentId)
-    let hiddenContainer = null
+    let iframe = null
     try {
-      // Strip the print button from the HTML before converting to PDF
+      // Strip the "Print" button from the HTML before converting
       const pdfHtml = built.html.replace(/<div class="no-print"[\s\S]*?<\/div>\s*<\/body>/, '</body>')
 
-      // Extract body contents to inject into our container
-      const bodyMatch = pdfHtml.match(/<body[^>]*>([\s\S]*?)<\/body>/i)
-      const bodyInner = bodyMatch ? bodyMatch[1] : pdfHtml
+      // Create a hidden iframe sized to letter width at ~96dpi (816px ≈ 8.5in).
+      // Hidden via opacity/z-index so the user doesn't see a flash, but
+      // it's actually on-screen so the browser fully lays it out.
+      iframe = document.createElement('iframe')
+      iframe.style.position = 'fixed'
+      iframe.style.top = '0'
+      iframe.style.left = '0'
+      iframe.style.width = '816px'
+      iframe.style.height = '1200px'
+      iframe.style.border = '0'
+      iframe.style.opacity = '0'
+      iframe.style.pointerEvents = 'none'
+      iframe.style.zIndex = '-1'
+      document.body.appendChild(iframe)
 
-      // Build a visible-but-offscreen container with the body styles re-applied.
-      // We position at top:0 left:0 (not -99999px) because html2canvas can
-      // collapse far-offscreen elements to zero size. We hide via z-index:-1
-      // and opacity:0 so the user doesn't see a flash, but layout is real.
-      hiddenContainer = document.createElement('div')
-      hiddenContainer.style.position = 'fixed'
-      hiddenContainer.style.top = '0'
-      hiddenContainer.style.left = '0'
-      hiddenContainer.style.width = '800px'
-      hiddenContainer.style.background = '#ffffff'
-      hiddenContainer.style.padding = '32px'
-      hiddenContainer.style.fontFamily = 'Segoe UI, system-ui, sans-serif'
-      hiddenContainer.style.fontSize = '13px'
-      hiddenContainer.style.color = '#1a1a1a'
-      hiddenContainer.style.zIndex = '-1'
-      hiddenContainer.style.opacity = '0'
-      hiddenContainer.style.pointerEvents = 'none'
-      hiddenContainer.innerHTML = bodyInner
-      document.body.appendChild(hiddenContainer)
+      // Write the full HTML document into the iframe and wait for it to render
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Iframe render timed out')), 8000)
+        iframe.onload = () => {
+          clearTimeout(timeout)
+          // Give two paint cycles after load so styles fully apply
+          requestAnimationFrame(() => requestAnimationFrame(resolve))
+        }
+        const doc = iframe.contentDocument || iframe.contentWindow.document
+        doc.open()
+        doc.write(pdfHtml)
+        doc.close()
+        // Some browsers don't fire onload for document.write; fall back to a timer
+        setTimeout(() => {
+          clearTimeout(timeout)
+          requestAnimationFrame(() => requestAnimationFrame(resolve))
+        }, 500)
+      })
 
-      // Give the browser two paint cycles so layout is computed before capture
-      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+      const iframeDoc = iframe.contentDocument || iframe.contentWindow.document
+      const target = iframeDoc.body
 
-      // Sanity-check: if the container has no height, html2canvas will produce a blank PDF
-      if (hiddenContainer.offsetHeight === 0) {
+      // Sanity check: iframe body must have measurable height
+      if (!target || target.scrollHeight === 0) {
         alert('Could not render the statement for PDF conversion. Please try again or use Print instead.')
         return
       }
 
-      // Convert to PDF blob
+      // Convert iframe body to PDF blob
       const pdfBlob = await html2pdf()
         .set({
           margin: 10,
           filename: `Commission Statement - ${built.propertyAddress || 'Statement'}.pdf`,
           image: { type: 'jpeg', quality: 0.95 },
-          html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' },
+          html2canvas: {
+            scale: 2,
+            useCORS: true,
+            backgroundColor: '#ffffff',
+            windowWidth: 816,
+            scrollX: 0,
+            scrollY: 0,
+          },
           jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' },
+          pagebreak: { mode: ['avoid-all', 'css', 'legacy'] },
         })
-        .from(hiddenContainer)
+        .from(target)
         .toPdf()
         .output('blob')
 
-      // Sanity-check the PDF blob size — anything under ~2KB is almost certainly blank
       if (!pdfBlob || pdfBlob.size < 2000) {
         alert(`PDF generated but appears empty (${pdfBlob?.size||0} bytes). Email not sent.`)
         return
@@ -596,8 +617,8 @@ export default function TransactionDetail() {
     } catch (err) {
       alert(`Failed to send email: ${err?.message || err}`)
     } finally {
-      if (hiddenContainer && hiddenContainer.parentNode) {
-        hiddenContainer.parentNode.removeChild(hiddenContainer)
+      if (iframe && iframe.parentNode) {
+        iframe.parentNode.removeChild(iframe)
       }
       setEmailingAgent(null)
     }
