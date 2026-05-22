@@ -14,7 +14,7 @@ export default function Money() {
   async function load() {
     const { data } = await supabase
       .from('disbursements')
-      .select('*, transactions(street_address,city,state,sale_price,selling_commission_pct,close_date,admin_fee_payer,deductions_withheld,type,transaction_agents(*,agents(first_name,last_name),plans(*))), agents(first_name,last_name)')
+      .select('*, transactions(street_address,city,state,sale_price,selling_commission_pct,close_date,admin_fee_payer,deductions_withheld,type,status,transaction_agents(*,agents(first_name,last_name),plans(*))), agents(first_name,last_name)')
       .order('created_at', { ascending: false })
     setDisbs(data || [])
     setLoading(false)
@@ -25,16 +25,54 @@ export default function Money() {
     await load()
   }
 
-  const filtered = disbs.filter(d => filter === 'all' || (filter === 'paid' ? d.paid : !d.paid))
+  // ── Derive the amount that should appear on a disbursement row ────────
+  // For closed deals this reads locked_agent_net from transaction_agents
+  // (the immutable source of truth). For pre-close or unlocked rows it
+  // falls back to calcCommission. The combined row sums every agent on
+  // the deal; individual rows show just that agent's net.
+  function rowAmount(d) {
+    const t = d.transactions
+    if (!t) return 0
+    const isCombined = d.agent_id === null
+    const tas = t.transaction_agents || []
+    const deduct = t.deductions_withheld || 0
 
-  const totalPaid = disbs.filter(d=>d.paid).reduce((s,d) => {
-    const t = d.transactions; if(!t) return s
-    return s + (t.sale_price||0)*((t.selling_commission_pct||0)/100)
-  }, 0)
-  const totalUnpaid = disbs.filter(d=>!d.paid).reduce((s,d) => {
-    const t = d.transactions; if(!t) return s
-    return s + (t.sale_price||0)*((t.selling_commission_pct||0)/100)
-  }, 0)
+    function netFor(ta) {
+      // Prefer locked value on closed deals (immutable)
+      if (ta.locked_agent_net !== null && ta.locked_agent_net !== undefined) {
+        return Number(ta.locked_agent_net) || 0
+      }
+      // Fallback: recompute (open/unlocked deals only)
+      const comm = calcCommission(t, ta, ta.plans || null, 0, tas.indexOf(ta) === 0)
+      return comm?.agent_net || 0
+    }
+
+    if (isCombined) {
+      // Combined row = sum of every agent's net on the deal
+      return tas.reduce((s, ta) => s + netFor(ta), 0) - deduct
+    }
+    const ta = tas.find(x => x.agent_id === d.agent_id)
+    if (!ta) return 0
+    return netFor(ta) - deduct
+  }
+
+  // ── Hide redundant Combined rows ──────────────────────────────────────
+  // For each transaction_id, if any Individual disbursement rows exist,
+  // hide the Combined row (it would double-count). Keep Combined rows
+  // only when no Individuals exist (single-agent deals).
+  const txnHasIndividual = new Set(
+    disbs.filter(d => d.agent_id !== null).map(d => d.transaction_id)
+  )
+  const visibleDisbs = disbs.filter(d => {
+    if (d.agent_id === null && txnHasIndividual.has(d.transaction_id)) return false
+    return true
+  })
+
+  const filtered = visibleDisbs.filter(d => filter === 'all' || (filter === 'paid' ? d.paid : !d.paid))
+
+  // Totals run on the visible (deduplicated) set so a deal is never counted twice
+  const totalPaid = visibleDisbs.filter(d => d.paid).reduce((s, d) => s + rowAmount(d), 0)
+  const totalUnpaid = visibleDisbs.filter(d => !d.paid).reduce((s, d) => s + rowAmount(d), 0)
 
   if (loading) return <div className="loading"><div className="spinner"/>Loading…</div>
 
@@ -44,7 +82,7 @@ export default function Money() {
         <div><div className="sec-title">Disbursements</div><div className="sec-sub">Commission payments to agents</div></div>
       </div>
       <div className="stats-grid" style={{gridTemplateColumns:'repeat(3,1fr)',marginBottom:18}}>
-        <div className="stat-card"><div className="stat-num">{disbs.length}</div><div className="stat-lbl">Total Disbursements</div></div>
+        <div className="stat-card"><div className="stat-num">{visibleDisbs.length}</div><div className="stat-lbl">Total Disbursements</div></div>
         <div className="stat-card"><div className="stat-num" style={{color:'var(--amber)'}}>{fmt$(totalUnpaid)}</div><div className="stat-lbl">Pending Payment</div></div>
         <div className="stat-card"><div className="stat-num" style={{color:'var(--green)'}}>{fmt$(totalPaid)}</div><div className="stat-lbl">Total Paid</div></div>
       </div>
@@ -62,22 +100,17 @@ export default function Money() {
                 const t = d.transactions
                 if (!t) return null
                 const isCombined = d.agent_id === null
-                const ta = isCombined
-                  ? t.transaction_agents?.[0]
-                  : t.transaction_agents?.find(ta => ta.agent_id === d.agent_id)
-                const plan = ta?.plans || null
-                const comm = ta ? calcCommission(t, ta, plan, 0) : null
-                const agentNet = comm ? comm.agent_net - (t.deductions_withheld||0) : 0
                 const agentName = isCombined
                   ? (t.transaction_agents||[]).map(ta=>ta.agents?.first_name).filter(Boolean).join(' + ')
                   : d.agents ? `${d.agents.first_name} ${d.agents.last_name}` : '—'
+                const amount = rowAmount(d)
                 return (
                   <tr key={d.id} style={{cursor:'pointer'}} onClick={()=>navigate(`/transactions/${d.transaction_id}`)}>
                     <td><span className="tbl-link">{t.street_address}</span><div style={{fontSize:11,color:'var(--txt3)'}}>{t.city}, {t.state}</div></td>
                     <td><span className="badge badge-navy" style={{fontSize:9}}>{isCombined?'Combined':'Individual'}</span></td>
                     <td style={{fontSize:12}}>{agentName}</td>
                     <td style={{color:'var(--txt2)'}}>{t.close_date}</td>
-                    <td style={{color:'var(--teal)',fontWeight:700}}>{fmt$(agentNet)}</td>
+                    <td style={{color:'var(--teal)',fontWeight:700}}>{fmt$(amount)}</td>
                     <td>{d.paid?<span className="badge badge-green">Paid</span>:<span className="badge badge-amber">Pending</span>}</td>
                     <td onClick={e=>e.stopPropagation()}>
                       {!d.paid&&<button className="btn btn-teal btn-sm" onClick={()=>markPaid(d.id)}>✓ Mark Paid</button>}
