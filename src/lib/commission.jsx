@@ -167,3 +167,151 @@ export function statusBadge(status) {
   const [cls, label] = map[status] || ['badge-grey', status]
   return <span className={`badge ${cls}`}>{label}</span>
 }
+
+// ══════════════════════════════════════════════════════════════════════
+// ROLLOVER WINDOW LOGIC
+// ══════════════════════════════════════════════════════════════════════
+//
+// All cap math depends on knowing how much broker_net the agent has paid
+// "this period." The period boundaries depend on the plan's rollover_type.
+//
+// computeCapWindow returns { windowStart, windowEnd } as Date objects.
+// Any closed transaction with close_date in [windowStart, windowEnd]
+// counts toward the agent's broker_paid for this period.
+//
+// loadBrokerPaidYTD does the Supabase query against that window and
+// returns the sum of locked_broker_net.
+//
+// Defensive behavior: if any required date is missing (e.g. agent has
+// no start_date but plan is rollover_type='start_date'), falls back to
+// calendar_year with a console.warn so the page still works and the
+// missing data is visible to the developer.
+//
+
+/**
+ * Compute the cap rollover window for a plan + agent at a given date.
+ * @param {object} plan         - plan record (must have rollover_type; may have rollover_date)
+ * @param {object} agent        - agent record (may have start_date)
+ * @param {Date|string} asOf    - the date we're evaluating around (typically close_date)
+ * @returns {{windowStart: Date, windowEnd: Date, rolloverType: string}}
+ */
+export function computeCapWindow(plan, agent, asOf) {
+  const asOfDate = (asOf instanceof Date) ? asOf : new Date(asOf)
+  if (!asOfDate || isNaN(asOfDate.getTime())) {
+    // Garbage asOf — return calendar year of today as a safe default
+    const y = new Date().getFullYear()
+    return { windowStart: new Date(y, 0, 1), windowEnd: new Date(y, 11, 31, 23, 59, 59), rolloverType: 'calendar_year' }
+  }
+
+  const rolloverType = plan?.rollover_type || 'calendar_year'
+
+  // Helper: the most recent occurrence of (month, day) on or before asOfDate.
+  // Returns Date. Handles year boundaries.
+  function lastAnniversaryOnOrBefore(month /* 0-11 */, day, refDate) {
+    const y = refDate.getFullYear()
+    let candidate = new Date(y, month, day)
+    if (candidate > refDate) {
+      candidate = new Date(y - 1, month, day)
+    }
+    return candidate
+  }
+
+  function addYears(d, n) {
+    return new Date(d.getFullYear() + n, d.getMonth(), d.getDate())
+  }
+
+  function lastDayOfMonth(year, monthIndex) {
+    return new Date(year, monthIndex + 1, 0, 23, 59, 59)
+  }
+
+  switch (rolloverType) {
+    case 'start_date': {
+      const start = agent?.start_date ? new Date(agent.start_date) : null
+      if (!start || isNaN(start.getTime())) {
+        console.warn(`[cap window] Plan uses rollover_type='start_date' but agent has no start_date. Falling back to calendar_year.`, { agent })
+        return computeCapWindow({ ...plan, rollover_type: 'calendar_year' }, agent, asOfDate)
+      }
+      const anniv = lastAnniversaryOnOrBefore(start.getMonth(), start.getDate(), asOfDate)
+      const windowEnd = new Date(addYears(anniv, 1).getTime() - 1) // one second before next anniversary
+      return { windowStart: anniv, windowEnd, rolloverType }
+    }
+
+    case 'custom_date': {
+      const rollover = plan?.rollover_date ? new Date(plan.rollover_date) : null
+      if (!rollover || isNaN(rollover.getTime())) {
+        console.warn(`[cap window] Plan uses rollover_type='custom_date' but has no rollover_date. Falling back to calendar_year.`, { plan })
+        return computeCapWindow({ ...plan, rollover_type: 'calendar_year' }, agent, asOfDate)
+      }
+      const anniv = lastAnniversaryOnOrBefore(rollover.getMonth(), rollover.getDate(), asOfDate)
+      const windowEnd = new Date(addYears(anniv, 1).getTime() - 1)
+      return { windowStart: anniv, windowEnd, rolloverType }
+    }
+
+    case 'calendar_year': {
+      const y = asOfDate.getFullYear()
+      return { windowStart: new Date(y, 0, 1), windowEnd: new Date(y, 11, 31, 23, 59, 59), rolloverType }
+    }
+
+    case 'monthly': {
+      const y = asOfDate.getFullYear()
+      const m = asOfDate.getMonth()
+      return { windowStart: new Date(y, m, 1), windowEnd: lastDayOfMonth(y, m), rolloverType }
+    }
+
+    case 'rolling':
+    case 'rolling_rollover': {
+      // Trailing 12 months ending at asOfDate
+      const windowEnd = asOfDate
+      const windowStart = new Date(asOfDate.getFullYear() - 1, asOfDate.getMonth(), asOfDate.getDate() + 1)
+      return { windowStart, windowEnd, rolloverType: 'rolling' }
+    }
+
+    case 'none': {
+      // No reset, ever. Use a very-distant start (Unix epoch) and asOfDate as end.
+      return { windowStart: new Date(0), windowEnd: asOfDate, rolloverType }
+    }
+
+    default: {
+      console.warn(`[cap window] Unknown rollover_type='${rolloverType}'. Falling back to calendar_year.`)
+      const y = asOfDate.getFullYear()
+      return { windowStart: new Date(y, 0, 1), windowEnd: new Date(y, 11, 31, 23, 59, 59), rolloverType: 'calendar_year' }
+    }
+  }
+}
+
+/**
+ * Load the broker_paid total for an agent over their plan's current cap window.
+ * @param {object}  supabase     - supabase client
+ * @param {string}  agentId      - the agent's UUID
+ * @param {object}  plan         - plan record (provides rollover_type and rollover_date)
+ * @param {object}  agent        - agent record (provides start_date)
+ * @param {Date|string} asOf     - date to evaluate the window around (default: now)
+ * @param {string?} excludeTxnId - optional transaction id to exclude (used when re-locking
+ *                                 the current transaction so it doesn't count toward its own
+ *                                 YTD)
+ * @returns {Promise<number>}    - total locked_broker_net for closed deals in window
+ */
+export async function loadBrokerPaidYTD(supabase, agentId, plan, agent, asOf = new Date(), excludeTxnId = null) {
+  const { windowStart, windowEnd } = computeCapWindow(plan, agent, asOf)
+  const startStr = windowStart.toISOString().slice(0, 10)
+  const endStr   = windowEnd.toISOString().slice(0, 10)
+
+  let query = supabase
+    .from('transaction_agents')
+    .select('locked_broker_net,transactions!inner(status,close_date,id)')
+    .eq('agent_id', agentId)
+    .eq('transactions.status', 'closed')
+    .gte('transactions.close_date', startStr)
+    .lte('transactions.close_date', endStr)
+
+  if (excludeTxnId) {
+    query = query.neq('transactions.id', excludeTxnId)
+  }
+
+  const { data, error } = await query
+  if (error) {
+    console.warn('[loadBrokerPaidYTD] Supabase query failed:', error)
+    return 0
+  }
+  return (data || []).reduce((s, r) => s + (r.locked_broker_net || 0), 0)
+}
