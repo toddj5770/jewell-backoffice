@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import html2pdf from 'html2pdf.js'
 import { useAuth } from '../../hooks/useAuth'
 import { useParams, useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
@@ -29,12 +30,13 @@ export default function TransactionDetail() {
   const [ytdMap, setYtdMap] = useState({})
   const [disbs, setDisbs] = useState([])
   const [trustEntries, setTrustEntries] = useState([])
+  const [emailingAgent, setEmailingAgent] = useState(null)
 
   useEffect(() => { loadMeta(); if(!isNew) loadTxn() }, [id])
 
   async function loadMeta() {
     const [ar,pr,sr] = await Promise.all([
-      supabase.from('agents').select('id,first_name,last_name,plan_id,plans(*)').eq('status','active'),
+      supabase.from('agents').select('id,first_name,last_name,email,plan_id,plans(*)').eq('status','active'),
       supabase.from('plans').select('*').eq('status','active'),
       supabase.from('settings').select('*').single(),
     ])
@@ -46,7 +48,7 @@ export default function TransactionDetail() {
   async function loadTxn() {
     const [tr,tar,dr,ter] = await Promise.all([
       supabase.from('transactions').select('*').eq('id',id).single(),
-      supabase.from('transaction_agents').select('*,agents(id,first_name,last_name),plans(*)').eq('transaction_id',id).order('sort_order'),
+      supabase.from('transaction_agents').select('*,agents(id,first_name,last_name,email),plans(*)').eq('transaction_id',id).order('sort_order'),
       supabase.from('disbursements').select('*').eq('transaction_id',id),
       supabase.from('trust_entries').select('*').eq('transaction_id',id).order('received_date'),
     ])
@@ -401,15 +403,18 @@ export default function TransactionDetail() {
   const combinedDisb=disbs.find(d=>d.agent_id===null)
   const indivDisbs=disbs.filter(d=>d.agent_id!==null)
 
-
-  function printDisbursement(agentId) {
+  // ── Shared HTML builder for both print and email ────────────────────
+  // Returns { html, agentName, propertyAddress } for the given agentId
+  // (or all agents if agentId is null).
+  function buildDisbursementHTML(agentId) {
     const isDraft = !isClosed
     const agentsToShow = agentId ? tas.filter(t=>t.agent_id===agentId) : tas
-    if(agentsToShow.length===0){alert('No agents on this transaction');return}
+    if(agentsToShow.length===0) return null
 
     function fp(n){ return '$'+Number(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) }
 
     let lines = ''
+    let firstAgentName = ''
     agentsToShow.forEach((ta, printIdx) => {
       const plan = getPlan(ta)
       const isPrimaryAgent = tas.indexOf(ta) === 0
@@ -417,6 +422,7 @@ export default function TransactionDetail() {
       const ao = agents.find(a=>a.id===ta.agent_id)||ta.agents
       const vol = (Number(txn.sale_price)||0)*((Number(ta.volume_pct)||0)/100)
       const agentName = (ao?.first_name||'') + ' ' + (ao?.last_name||'')
+      if (printIdx === 0) firstAgentName = agentName
       const adminRow = comm.admin_fee_payer === 'waived'
         ? '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;font-style:italic;">Admin Fee (Waived)</td><td style="padding:7px 0;border-bottom:1px solid #eee;color:#888;text-align:right;font-style:italic;">' + fp(0) + '</td></tr>'
         : comm.admin_fee > 0
@@ -448,6 +454,7 @@ export default function TransactionDetail() {
     const status = isDraft ? 'DRAFT' : 'FINAL'
     const closeInfo = txn.close_date || txn.estimated_close_date || 'TBD'
     const mlsRow = txn.mls_number ? '<div style="font-size:11px;color:#999;">MLS # ' + txn.mls_number + '</div>' : ''
+    const propertyAddress = (txn.street_address||'') + (txn.city ? (', ' + txn.city) : '')
 
     const html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Commission Disbursement</title>'
       + '<style>body{font-family:Segoe UI,system-ui,sans-serif;font-size:13px;color:#1a1a1a;margin:0;padding:0;}@media print{.no-print{display:none!important;}}</style>'
@@ -465,9 +472,107 @@ export default function TransactionDetail() {
       + '<button onclick="window.print()" style="background:#0f2744;color:#fff;border:none;padding:10px 24px;border-radius:6px;font-size:14px;cursor:pointer;">⎙ Print / Save as PDF</button>'
       + '</div></body></html>'
 
+    return { html, agentName: firstAgentName, propertyAddress }
+  }
+
+  function printDisbursement(agentId) {
+    const built = buildDisbursementHTML(agentId)
+    if (!built) { alert('No agents on this transaction'); return }
     const w = window.open('', '_blank')
-    w.document.write(html)
+    w.document.write(built.html)
     w.document.close()
+  }
+
+  // ── Email a single agent's commission statement as a PDF attachment ──
+  async function emailDisbursement(agentId) {
+    const ao = agents.find(a=>a.id===agentId) || tas.find(t=>t.agent_id===agentId)?.agents
+    if (!ao) { alert('Agent not found'); return }
+    if (!ao.email) { alert(`No email address on file for ${ao.first_name} ${ao.last_name}. Please add one in Agents settings.`); return }
+
+    const built = buildDisbursementHTML(agentId)
+    if (!built) { alert('Unable to build statement for this agent.'); return }
+
+    if (!window.confirm(`Email commission statement for ${built.propertyAddress || 'this transaction'} to ${ao.first_name} ${ao.last_name} (${ao.email})?`)) return
+
+    setEmailingAgent(agentId)
+    let hiddenContainer = null
+    try {
+      // Strip the print button from the HTML before converting to PDF
+      const pdfHtml = built.html.replace(/<div class="no-print"[\s\S]*?<\/div>\s*<\/body>/, '</body>')
+
+      // Render the HTML offscreen so html2pdf can process it
+      hiddenContainer = document.createElement('div')
+      hiddenContainer.style.position = 'fixed'
+      hiddenContainer.style.left = '-99999px'
+      hiddenContainer.style.top = '0'
+      hiddenContainer.style.width = '800px'
+      // Extract just the <body> contents — html2pdf renders the element we hand it
+      const bodyMatch = pdfHtml.match(/<body[^>]*>([\s\S]*?)<\/body>/i)
+      hiddenContainer.innerHTML = bodyMatch ? bodyMatch[1] : pdfHtml
+      document.body.appendChild(hiddenContainer)
+
+      // Convert to PDF blob
+      const pdfBlob = await html2pdf()
+        .set({
+          margin: 10,
+          filename: `Commission Statement - ${built.propertyAddress || 'Statement'}.pdf`,
+          image: { type: 'jpeg', quality: 0.95 },
+          html2canvas: { scale: 2, useCORS: true },
+          jsPDF: { unit: 'mm', format: 'letter', orientation: 'portrait' },
+        })
+        .from(hiddenContainer)
+        .toPdf()
+        .output('blob')
+
+      // Base64-encode the blob (without the data:... prefix)
+      const pdf_base64 = await new Promise((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => {
+          const result = reader.result || ''
+          const comma = String(result).indexOf(',')
+          resolve(comma >= 0 ? String(result).slice(comma + 1) : String(result))
+        }
+        reader.onerror = () => reject(reader.error)
+        reader.readAsDataURL(pdfBlob)
+      })
+
+      // POST to the Edge Function
+      const { data: { session } } = await supabase.auth.getSession()
+      const token = session?.access_token
+      if (!token) { alert('Not signed in — cannot send email.'); return }
+
+      const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/email-statement`
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          to: ao.email,
+          agent_name: `${ao.first_name||''} ${ao.last_name||''}`.trim(),
+          property_address: built.propertyAddress || (txn.street_address || 'Transaction'),
+          pdf_base64,
+          filename: `Commission Statement - ${built.propertyAddress || 'Statement'}.pdf`,
+        }),
+      })
+
+      const resBody = await res.json().catch(() => ({}))
+      if (!res.ok || !resBody.ok) {
+        const detail = resBody?.detail ? JSON.stringify(resBody.detail) : (resBody?.error || res.statusText)
+        alert(`Failed to send email: ${detail}`)
+        return
+      }
+
+      alert(`✓ Statement emailed to ${ao.email}`)
+    } catch (err) {
+      alert(`Failed to send email: ${err?.message || err}`)
+    } finally {
+      if (hiddenContainer && hiddenContainer.parentNode) {
+        hiddenContainer.parentNode.removeChild(hiddenContainer)
+      }
+      setEmailingAgent(null)
+    }
   }
 
   return (
@@ -680,7 +785,12 @@ export default function TransactionDetail() {
                     <td style={{color:'var(--teal)',fontWeight:700}}>{fmt$(comm.agent_net)}</td>
                     <td>{fmt$(comm.broker_net)}</td>
                     <td>{fmt$(vol)}</td>
-                    <td><button className="btn btn-ghost btn-sm" onClick={()=>printDisbursement(ta.agent_id)}>⎙ Print</button></td>
+                    <td>
+                      <div style={{display:'flex',gap:4}}>
+                        <button className="btn btn-ghost btn-sm" onClick={()=>printDisbursement(ta.agent_id)}>⎙ Print</button>
+                        {isClosed&&<button className="btn btn-ghost btn-sm" disabled={emailingAgent===ta.agent_id} onClick={()=>emailDisbursement(ta.agent_id)}>{emailingAgent===ta.agent_id?'Sending…':'📧 Email'}</button>}
+                      </div>
+                    </td>
                   </tr>
                 })}
                 <tr style={{background:'var(--surf)',fontWeight:700}}>
@@ -708,7 +818,15 @@ export default function TransactionDetail() {
                 <td style={{fontWeight:600}}>{ao?.first_name} {ao?.last_name}</td>
                 <td style={{color:'var(--teal)',fontWeight:700}}>{fmt$(comm.agent_net)}</td>
                 <td>{indiv?<span className={`badge ${indiv.paid?'badge-green':'badge-amber'}`}>{indiv.paid?'Paid':'Pending'}</span>:'—'}</td>
-                <td>{indiv?<button className="btn btn-ghost btn-sm" onClick={()=>printDisbursement(ta.agent_id)}>⎙ Print Individual</button>:<button className="btn btn-ghost btn-sm" onClick={()=>genIndivDisb(ta.agent_id)}>Generate</button>}</td>
+                <td>
+                  {indiv?
+                    <div style={{display:'flex',gap:4}}>
+                      <button className="btn btn-ghost btn-sm" onClick={()=>printDisbursement(ta.agent_id)}>⎙ Print Individual</button>
+                      <button className="btn btn-ghost btn-sm" disabled={emailingAgent===ta.agent_id} onClick={()=>emailDisbursement(ta.agent_id)}>{emailingAgent===ta.agent_id?'Sending…':'📧 Email'}</button>
+                    </div>
+                    :<button className="btn btn-ghost btn-sm" onClick={()=>genIndivDisb(ta.agent_id)}>Generate</button>
+                  }
+                </td>
               </tr>
             })}</tbody>
           </table></div>
