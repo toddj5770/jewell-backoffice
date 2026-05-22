@@ -3,7 +3,7 @@ import html2pdf from 'html2pdf.js'
 import { useAuth } from '../../hooks/useAuth'
 import { useParams, useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
-import { fmt$, fmtPct, calcCommission, statusBadge } from '../../lib/commission'
+import { fmt$, fmtPct, calcCommission, statusBadge, loadBrokerPaidYTD } from '../../lib/commission'
 
 const EMPTY = {
   type:'selling',status:'active',street_address:'',city:'',state:'TN',zip:'',
@@ -36,7 +36,7 @@ export default function TransactionDetail() {
 
   async function loadMeta() {
     const [ar,pr,sr] = await Promise.all([
-      supabase.from('agents').select('id,first_name,last_name,email,plan_id,plans(*)').eq('status','active'),
+      supabase.from('agents').select('id,first_name,last_name,email,start_date,plan_id,plans(*)').eq('status','active'),
       supabase.from('plans').select('*').eq('status','active'),
       supabase.from('settings').select('*').single(),
     ])
@@ -48,25 +48,33 @@ export default function TransactionDetail() {
   async function loadTxn() {
     const [tr,tar,dr,ter] = await Promise.all([
       supabase.from('transactions').select('*').eq('id',id).single(),
-      supabase.from('transaction_agents').select('*,agents(id,first_name,last_name,email),plans(*)').eq('transaction_id',id).order('sort_order'),
+      supabase.from('transaction_agents').select('*,agents(id,first_name,last_name,email,start_date),plans(*)').eq('transaction_id',id).order('sort_order'),
       supabase.from('disbursements').select('*').eq('transaction_id',id),
       supabase.from('trust_entries').select('*').eq('transaction_id',id).order('received_date'),
     ])
     if(tr.data) setTxn(tr.data)
-    if(tar.data) { setTas(tar.data); loadYTD(tar.data.map(t=>t.agent_id)) }
+    if(tar.data) { setTas(tar.data); loadYTD(tar.data) }
     if(dr.data) setDisbs(dr.data)
     if(ter.data) setTrustEntries(ter.data)
     setLoading(false)
   }
 
-  async function loadYTD(ids) {
-    const yr = new Date().getFullYear()
+  // ── ROLLOVER-AWARE YTD LOADER ────────────────────────────────────────
+  // Each transaction_agent row carries its own agent + plan (joined via
+  // Supabase). We use that plan's rollover_type and the agent's start_date
+  // to compute the right cap window. asOf is the transaction's close_date
+  // when closed, otherwise today (for preview).
+  async function loadYTD(taRows) {
+    const asOf = txn.close_date ? new Date(txn.close_date) : new Date()
     const map = {}
-    for(const aid of ids) {
-      const {data} = await supabase.from('transaction_agents')
-        .select('locked_broker_net,transactions!inner(status,close_date)')
-        .eq('agent_id',aid).eq('transactions.status','closed')
-      map[aid] = (data||[]).filter(r=>new Date(r.transactions?.close_date).getFullYear()===yr).reduce((s,r)=>s+(r.locked_broker_net||0),0)
+    for (const ta of taRows || []) {
+      if (!ta.agent_id) continue
+      // Resolve plan: per-deal override, else agent's default plan, else null
+      const plan = ta.plan_id
+        ? (plans.find(p => p.id === ta.plan_id) || ta.plans)
+        : (ta.agents?.plans || agents.find(a => a.id === ta.agent_id)?.plans)
+      const agent = ta.agents || agents.find(a => a.id === ta.agent_id)
+      map[ta.agent_id] = await loadBrokerPaidYTD(supabase, ta.agent_id, plan, agent, asOf, null)
     }
     setYtdMap(map)
   }
@@ -75,6 +83,9 @@ export default function TransactionDetail() {
   function getPlan(ta) {
     if(ta.plan_id) return plans.find(p=>p.id===ta.plan_id)||ta.plans||null
     return agents.find(a=>a.id===ta.agent_id)?.plans||null
+  }
+  function getAgent(ta) {
+    return ta.agents || agents.find(a => a.id === ta.agent_id) || null
   }
   function addTA() {
     setTas(rows=>[...rows,{_new:true,agent_id:'',split_type:'percent',split_value:rows.length===0?100:0,volume_pct:0,plan_id:null,sort_order:rows.length}])
@@ -157,32 +168,25 @@ export default function TransactionDetail() {
       // Reload tas with fresh ids before re-locking
       const { data: freshTas } = await supabase
         .from('transaction_agents')
-        .select('*,agents(id,first_name,last_name),plans(*)')
+        .select('*,agents(id,first_name,last_name,start_date),plans(*)')
         .eq('transaction_id', tid)
         .order('sort_order')
 
-      // Fetch fresh broker_paid_ytd for each agent, EXCLUDING this deal itself
-      const yr = new Date(txn.close_date).getFullYear()
       for (let i = 0; i < (freshTas || []).length; i++) {
         const ta = freshTas[i]
-        const { data: priorRows } = await supabase
-          .from('transaction_agents')
-          .select('locked_broker_net,transactions!inner(status,close_date,id)')
-          .eq('agent_id', ta.agent_id)
-          .eq('transactions.status', 'closed')
-          .neq('transactions.id', tid)
-        const priorYtd = (priorRows || [])
-          .filter(r => new Date(r.transactions?.close_date).getFullYear() === yr)
-          .reduce((s, r) => s + (r.locked_broker_net || 0), 0)
 
         const plan = ta.plan_id
           ? (plans.find(p => p.id === ta.plan_id) || ta.plans)
-          : (agents.find(a => a.id === ta.agent_id)?.plans || ta.plans)
+          : (ta.agents?.plans || agents.find(a => a.id === ta.agent_id)?.plans || ta.plans)
+        const agentRecord = ta.agents || agents.find(a => a.id === ta.agent_id)
 
         if (!plan) {
           alert(`Re-lock skipped for agent in row ${i + 1}: no commission plan found.`)
           continue
         }
+
+        // Use rollover-aware YTD, excluding this deal itself
+        const priorYtd = await loadBrokerPaidYTD(supabase, ta.agent_id, plan, agentRecord, txn.close_date, tid)
 
         const c = calcCommission(
           { ...txn, sale_price: Number(txn.sale_price), selling_commission_pct: Number(txn.selling_commission_pct) },
@@ -247,23 +251,18 @@ export default function TransactionDetail() {
       return
     }
 
-    // Fetch fresh YTD for every agent (exclude this deal itself)
+    // Fetch fresh YTD for every agent using rollover-aware windowing.
+    // Exclude this deal itself so it doesn't count toward its own YTD.
     const freshYtd = {}
-    const yr = new Date(cd).getFullYear()
     for (const ta of tas) {
-      const { data, error } = await supabase
-        .from('transaction_agents')
-        .select('locked_broker_net,transactions!inner(status,close_date,id)')
-        .eq('agent_id', ta.agent_id)
-        .eq('transactions.status', 'closed')
-        .neq('transactions.id', id)
-      if (error) {
-        alert(`Cannot close: failed to load cap progress for an agent. ${error.message}`)
+      const plan = getPlan(ta)
+      const agent = getAgent(ta)
+      try {
+        freshYtd[ta.agent_id] = await loadBrokerPaidYTD(supabase, ta.agent_id, plan, agent, cd, id)
+      } catch (err) {
+        alert(`Cannot close: failed to load cap progress for an agent. ${err.message || err}`)
         return
       }
-      freshYtd[ta.agent_id] = (data || [])
-        .filter(r => new Date(r.transactions?.close_date).getFullYear() === yr)
-        .reduce((s, r) => s + (r.locked_broker_net || 0), 0)
     }
 
     // Compute all locked values up front; abort if anything invalid
@@ -505,8 +504,6 @@ export default function TransactionDetail() {
       const pdfHtml = built.html.replace(/<div class="no-print"[\s\S]*?<\/div>\s*<\/body>/, '</body>')
 
       // Create a hidden iframe sized to letter width at ~96dpi (816px ≈ 8.5in).
-      // Hidden via opacity/z-index so the user doesn't see a flash, but
-      // it's actually on-screen so the browser fully lays it out.
       iframe = document.createElement('iframe')
       iframe.style.position = 'fixed'
       iframe.style.top = '0'
@@ -524,14 +521,12 @@ export default function TransactionDetail() {
         const timeout = setTimeout(() => reject(new Error('Iframe render timed out')), 8000)
         iframe.onload = () => {
           clearTimeout(timeout)
-          // Give two paint cycles after load so styles fully apply
           requestAnimationFrame(() => requestAnimationFrame(resolve))
         }
         const doc = iframe.contentDocument || iframe.contentWindow.document
         doc.open()
         doc.write(pdfHtml)
         doc.close()
-        // Some browsers don't fire onload for document.write; fall back to a timer
         setTimeout(() => {
           clearTimeout(timeout)
           requestAnimationFrame(() => requestAnimationFrame(resolve))
@@ -541,13 +536,11 @@ export default function TransactionDetail() {
       const iframeDoc = iframe.contentDocument || iframe.contentWindow.document
       const target = iframeDoc.body
 
-      // Sanity check: iframe body must have measurable height
       if (!target || target.scrollHeight === 0) {
         alert('Could not render the statement for PDF conversion. Please try again or use Print instead.')
         return
       }
 
-      // Convert iframe body to PDF blob
       const pdfBlob = await html2pdf()
         .set({
           margin: 10,
@@ -573,7 +566,6 @@ export default function TransactionDetail() {
         return
       }
 
-      // Base64-encode the blob (without the data:... prefix)
       const pdf_base64 = await new Promise((resolve, reject) => {
         const reader = new FileReader()
         reader.onload = () => {
@@ -585,7 +577,6 @@ export default function TransactionDetail() {
         reader.readAsDataURL(pdfBlob)
       })
 
-      // POST to the Edge Function
       const { data: { session } } = await supabase.auth.getSession()
       const token = session?.access_token
       if (!token) { alert('Not signed in — cannot send email.'); return }
