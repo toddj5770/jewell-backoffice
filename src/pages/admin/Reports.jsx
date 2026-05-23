@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../../lib/supabase'
-import { fmt$ } from '../../lib/commission'
+import { fmt$, calcCommission, filterRowsToCapWindow, formatCapWindow, getCapProgress } from '../../lib/commission'
 
 // ── All available fields per source ─────────────────────────
 const FIELDS = {
@@ -46,7 +46,7 @@ const FIELDS = {
     { key: 'eando_expiration',    label: 'E&O Exp',         type: 'date' },
     { key: 'plan_name',           label: 'Commission Plan', type: 'text', computed: true },
     { key: 'cap_amount',          label: 'Cap Amount',      type: 'number', fmt: 'currency', computed: true },
-    { key: 'ytd_gci',             label: 'YTD GCI',         type: 'number', fmt: 'currency', computed: true },
+    { key: 'ytd_gci',             label: 'YTD Net',         type: 'number', fmt: 'currency', computed: true },
     { key: 'ytd_deals',           label: 'YTD Deals',       type: 'number', computed: true },
     { key: 'broker_paid_ytd',     label: 'Broker Paid YTD', type: 'number', fmt: 'currency', computed: true },
     { key: 'cap_remaining',       label: 'Cap Remaining',   type: 'number', fmt: 'currency', computed: true },
@@ -84,7 +84,7 @@ const GROUP_OPTIONS = {
 
 const BUILTIN_REPORTS = [
   { id: 'gci_by_agent',        name: 'GCI by Agent',               icon: '👤', desc: 'Gross commission income per agent' },
-  { id: 'cap_progress',        name: 'Cap Progress',               icon: '🎯', desc: 'Cap status for all agents on cap plans' },
+  { id: 'cap_progress',        name: 'Cap Progress',               icon: '🎯', desc: 'Cap status for all agents on cap plans (uses each agent\'s rollover window)' },
   { id: 'transaction_summary', name: 'Transaction Summary',        icon: '🏠', desc: 'All transactions with full commission detail' },
   { id: 'lead_source',         name: 'Lead Source Attribution',    icon: '📊', desc: 'GCI and deal count by lead source' },
   { id: 'agent_production',    name: 'Agent Production Ranking',   icon: '🏆', desc: 'Agents ranked by volume and GCI' },
@@ -142,7 +142,6 @@ function getDatePreset(preset) {
       return { dateFrom: ymd(from), dateTo: ymd(to) }
     }
     case 'this_fy': {
-      // Fiscal year Jan-Dec
       return { dateFrom: `${y}-01-01`, dateTo: `${y}-12-31` }
     }
     case 'last_fy': {
@@ -201,6 +200,35 @@ function emptyFilter(source) {
   return { field: first?.key || '', op: 'contains', value: '', value2: '' }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// COMMISSION ATTRIBUTION HELPER
+// ═══════════════════════════════════════════════════════════════════════
+// For one transaction_agent row, compute the agent's slice. Prefers locked
+// values for closed deals (immutable). Falls back to live calc for open
+// deals using the agent's broker_paid in their current cap window.
+//
+// `brokerPaidYTDLookup` is a map of { agent_id → number } pre-computed for
+// open-deal previews. For closed deals it's ignored (locked values used).
+//
+// Returns: { agent_pct, agent_gross, agent_net, broker_net, admin_fee,
+//            admin_fee_payer, volume_credit, is_primary }
+function computeAgentSlice(t, ta, isPrimary, brokerPaidYTDLookup = {}) {
+  const plan = ta.plans || null
+  const ytd = brokerPaidYTDLookup[ta.agent_id] || 0
+  const c = calcCommission(t, ta, plan, ytd, isPrimary)
+  const volumeCredit = (Number(t.sale_price) || 0) * ((Number(ta.volume_pct) || 0) / 100)
+  return {
+    agent_pct:       c.pct,
+    agent_gross:     c.agent_gross,
+    agent_net:       c.agent_net,
+    broker_net:      c.broker_net,
+    admin_fee:       c.admin_fee,
+    admin_fee_payer: c.admin_fee_payer,
+    volume_credit:   volumeCredit,
+    is_primary:      isPrimary,
+  }
+}
+
 export default function Reports() {
   const [view, setView] = useState('list')
   const [activeReport, setActiveReport] = useState(null)
@@ -224,7 +252,7 @@ export default function Reports() {
       return
     }
     const range = getDatePreset(preset)
-    if (range) setBuiltinFilters({...range, preset})
+    if (range) setBuiltinFilters(f => ({...f, ...range, preset}))
   }
 
   useEffect(() => { loadMeta() }, [])
@@ -238,75 +266,140 @@ export default function Reports() {
 
   async function loadAllData() {
     const [txnRes, agentRes, trustRes] = await Promise.all([
-      supabase.from('transactions').select('*, transaction_agents(*, agents(id,first_name,last_name,office), plans(*))'),
+      // start_date on agents so cap-window math works for open-deal preview
+      supabase.from('transactions').select('*, transaction_agents(*, agents(id,first_name,last_name,office,start_date), plans(*))'),
       supabase.from('agents').select('*, plans(*)'),
       supabase.from('trust_entries').select('*, transactions(street_address,city,state,close_date,estimated_close_date)'),
     ])
-    const txns = (txnRes.data || []).map(t => enrichTransaction(t, agentRes.data || []))
-    const agts = (agentRes.data || []).map(a => enrichAgent(a, txnRes.data || []))
-    setAllData({ transactions: txns, agents: agts, rawAgents: agentRes.data || [], trustEntries: trustRes.data || [] })
+    const rawAgents = agentRes.data || []
+    const rawTxns = txnRes.data || []
+
+    // Build broker_paid_ytd lookup per agent for OPEN deal preview only.
+    // For closed deals, locked_broker_net is the source of truth, NOT this lookup.
+    // For open deals previewed today, use the agent's current rollover window.
+    const brokerPaidYTDLookup = {}
+    for (const agent of rawAgents) {
+      const plan = agent.plans
+      if (!plan) continue
+      // Gather this agent's closed transaction_agent rows with their parent
+      // transactions so filterRowsToCapWindow can filter to the current window.
+      const myRows = rawTxns
+        .filter(t => t.status === 'closed')
+        .flatMap(t => (t.transaction_agents || [])
+          .filter(ta => ta.agent_id === agent.id)
+          .map(ta => ({ ...ta, transactions: t })))
+      const inWindow = filterRowsToCapWindow(myRows, plan, agent, new Date())
+      brokerPaidYTDLookup[agent.id] = inWindow.reduce((s, r) => s + (Number(r.locked_broker_net) || 0), 0)
+    }
+
+    const txns = rawTxns.map(t => enrichTransaction(t, brokerPaidYTDLookup))
+    const agts = rawAgents.map(a => enrichAgent(a, rawTxns))
+    setAllData({
+      transactions: txns,
+      agents: agts,
+      rawAgents,
+      rawTransactions: rawTxns,
+      trustEntries: trustRes.data || [],
+      brokerPaidYTDLookup,
+    })
   }
 
-  function enrichTransaction(t, agentList) {
+  // ── ENRICH TRANSACTION ──────────────────────────────────────────
+  // Reads locked values for closed deals (per the immutability principle).
+  // Live-computes for open deals using each agent's current cap window YTD.
+  // Per-agent slices are tracked in `agent_slices` so reports can attribute
+  // correctly to individual agents (not divide totals by agent count).
+  function enrichTransaction(t, brokerPaidYTDLookup) {
     const gross = (t.sale_price || 0) * ((t.selling_commission_pct || 0) / 100)
-    let agentNet = 0, officeSplit = 0, adminFee = 0
+    const tas = t.transaction_agents || []
+    const agent_slices = []
+    let totalAgentNet = 0
+    let totalBrokerNet = 0
+    let totalAdminFee = 0
+    let totalVolumeCredit = 0
     const agentNames = []
-    let agentPctFirst = 0
-    ;(t.transaction_agents || []).forEach((ta, i) => {
+    let primaryAgentName = ''
+    let primaryAgentPct = 0
+
+    tas.forEach((ta, i) => {
+      const isPrimary = i === 0
       const a = ta.agents
-      if (a) agentNames.push(a.first_name + ' ' + a.last_name)
-      const plan = ta.plans
-      const fees = plan?.fees || []
-      const feeItem = fees.find(f => f.name === 'Admin Fee')
-      // Admin fee is per transaction, not per agent — only apply to primary agent (index 0)
-      const feeAmt = i === 0 ? (feeItem?.amt || 0) : 0
-      const payer = t.admin_fee_payer || feeItem?.payer || 'client'
-      const split = ta.split_type === 'dollar' ? ta.split_value : gross * ((ta.split_value || 100) / 100)
-      const agentPct = plan?.type === 'cap' ? (plan.cap_levels?.[0]?.pct || 90) : (plan?.agent_pct || 80)
-      if (i === 0) agentPctFirst = agentPct
-      let aN = split * (agentPct / 100)
-      let bN = split * ((100 - agentPct) / 100)
-      if (payer === 'agent') aN -= feeAmt
-      else if (payer === 'broker') bN -= feeAmt
-      const offAdmin = (payer === 'client' || payer === 'agent') ? feeAmt : 0
-      agentNet += aN
-      officeSplit += bN
-      adminFee += offAdmin
+      if (a) {
+        const fullName = (a.first_name || '') + ' ' + (a.last_name || '')
+        agentNames.push(fullName.trim())
+        if (isPrimary) primaryAgentName = fullName.trim()
+      }
+      const slice = computeAgentSlice(t, ta, isPrimary, brokerPaidYTDLookup)
+      agent_slices.push({
+        agent_id:   ta.agent_id,
+        agent_name: a ? ((a.first_name || '') + ' ' + (a.last_name || '')).trim() : '—',
+        office:     a?.office || '—',
+        ...slice,
+      })
+      totalAgentNet     += Number(slice.agent_net  || 0)
+      totalBrokerNet    += Number(slice.broker_net || 0)
+      totalAdminFee     += Number(slice.admin_fee  || 0)
+      totalVolumeCredit += Number(slice.volume_credit || 0)
+      if (isPrimary) primaryAgentPct = slice.agent_pct
     })
+
+    // Admin fee — count once per transaction. If the office "collected" it
+    // (payer = client or agent), it shows up as office income. If payer
+    // = broker, the office absorbs it. If waived, $0.
+    const adminFee = totalAdminFee
+    const primarySlice = agent_slices[0]
+    const adminFeePayer = primarySlice?.admin_fee_payer || t.admin_fee_payer || 'client'
+    const adminFeeCollected = (adminFeePayer === 'client' || adminFeePayer === 'agent') ? adminFee : 0
+
     return {
       ...t,
-      gross_commission: gross,
-      agent_net: agentNet,
-      office_split: officeSplit,
-      admin_fee_collected: adminFee,
-      total_office_income: officeSplit + adminFee,
-      agent_names: agentNames.join(', '),
-      agent_split_pct: agentPctFirst,
-      volume_credit: (t.transaction_agents || []).reduce((s, ta) => s + (t.sale_price || 0) * ((ta.volume_pct || 100) / 100), 0),
+      gross_commission:    gross,
+      agent_net:           totalAgentNet,
+      office_split:        totalBrokerNet,
+      admin_fee_collected: adminFeeCollected,
+      total_office_income: totalBrokerNet + adminFeeCollected,
+      agent_names:         agentNames.join(', '),
+      primary_agent:       primaryAgentName,
+      agent_split_pct:     primaryAgentPct,
+      volume_credit:       totalVolumeCredit,
+      agent_slices,
     }
   }
 
-  function enrichAgent(a, txnList) {
-    const thisYear = new Date().getFullYear()
-    const myTas = txnList.flatMap(t => (t.transaction_agents || []).filter(ta => ta.agent_id === a.id))
-    const closedTas = myTas.filter(ta => {
-      const t = txnList.find(t => t.id === ta.transaction_id)
-      return t?.status === 'closed' && t.close_date && new Date(t.close_date).getFullYear() === thisYear
-    })
-    const ytdGci = closedTas.reduce((s, ta) => {
-      const t = txnList.find(t => t.id === ta.transaction_id)
-      return s + (t?.sale_price || 0) * ((t?.selling_commission_pct || 0) / 100) * ((ta.split_value || 100) / 100)
-    }, 0)
-    const brokerPaidYtd = closedTas.reduce((s, ta) => s + (ta.locked_broker_net || 0), 0)
-    const cap = a.plans?.cap_amount || 0
+  // ── ENRICH AGENT ────────────────────────────────────────────────
+  // YTD figures use the agent's CURRENT cap rollover window (per their
+  // plan's rollover_type and start_date), NOT calendar year. broker_paid_ytd
+  // is un-clamped so overage is visible.
+  function enrichAgent(a, rawTxns) {
+    const plan = a.plans
+    // Gather agent's transaction_agent rows attached to their parent txns
+    const myRows = (rawTxns || []).flatMap(t =>
+      (t.transaction_agents || [])
+        .filter(ta => ta.agent_id === a.id)
+        .map(ta => ({ ...ta, transactions: t }))
+    )
+
+    // Filter to current cap window (closed only). Falls back to calendar
+    // year inside filterRowsToCapWindow if no plan / missing start_date.
+    const inWindow = plan
+      ? filterRowsToCapWindow(myRows, plan, a, new Date())
+      : myRows.filter(r => r.transactions?.status === 'closed' && r.transactions.close_date && new Date(r.transactions.close_date).getFullYear() === new Date().getFullYear())
+
+    // YTD GCI is true take-home (locked_agent_net) for closed deals
+    const ytdNet = inWindow.reduce((s, r) => s + (Number(r.locked_agent_net) || 0), 0)
+    const brokerPaidYtd = inWindow.reduce((s, r) => s + (Number(r.locked_broker_net) || 0), 0)
+    const cap = plan?.cap_amount || 0
+
     return {
       ...a,
-      plan_name: a.plans?.name || '—',
-      cap_amount: cap,
-      ytd_gci: ytdGci,
-      ytd_deals: closedTas.length,
-      broker_paid_ytd: Math.min(brokerPaidYtd, cap),
-      cap_remaining: Math.max(0, cap - brokerPaidYtd),
+      plan_name:        plan?.name || '—',
+      cap_amount:       cap,
+      ytd_gci:          ytdNet,       // now NET, not gross — label updated in FIELDS
+      ytd_deals:        inWindow.length,
+      broker_paid_ytd:  brokerPaidYtd,                 // un-clamped (truth)
+      cap_remaining:    Math.max(0, cap - brokerPaidYtd),
+      cap_overage:      Math.max(0, brokerPaidYtd - cap),
+      cap_window_label: plan ? formatCapWindow(plan, a, new Date()) : '',
     }
   }
 
@@ -457,35 +550,57 @@ export default function Reports() {
       return d && d >= df && d <= dt
     })
     let columns = [], rows = []
-    const thisYear = new Date().getFullYear()
     const moNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
 
     switch(id) {
       case 'gci_by_agent': {
+        // Per-agent attribution from agent_slices — NO division by row count.
+        // Each agent gets credited exactly their own slice on each deal.
         columns = ['Agent','Office','Deals','Total Volume','Gross GCI','Agent Net','Admin Fees','Office Split','Total Office Income']
         const map = {}
         closed.forEach(t => {
-          ;(t.transaction_agents||[]).forEach(ta => {
-            const a = ta.agents; if(!a) return
-            const k = ta.agent_id
-            const agentObj = allData.rawAgents.find(ag=>ag.id===k)
-            if(!map[k]) map[k]={name:a.first_name+' '+a.last_name,office:agentObj?.office||'—',deals:0,volume:0,gross:0,agentNet:0,adminFee:0,officeSplit:0}
+          (t.agent_slices || []).forEach(slice => {
+            const k = slice.agent_id
+            if (!map[k]) map[k] = { name: slice.agent_name, office: slice.office, deals: 0, volume: 0, gross: 0, agentNet: 0, adminFee: 0, officeSplit: 0 }
             map[k].deals++
-            map[k].volume += (t.sale_price||0)
-            map[k].gross += t.gross_commission
-            map[k].agentNet += t.agent_net / (t.transaction_agents?.length||1)
-            map[k].adminFee += t.admin_fee_collected / (t.transaction_agents?.length||1)
-            map[k].officeSplit += t.office_split / (t.transaction_agents?.length||1)
+            map[k].volume      += (t.sale_price || 0)
+            map[k].gross       += slice.agent_gross
+            map[k].agentNet    += slice.agent_net
+            map[k].officeSplit += slice.broker_net
+            // Admin fee — only the agent who actually pays/has it attributed (primary) is credited.
+            // It's the office's income if the client or agent paid it.
+            if (slice.is_primary && (slice.admin_fee_payer === 'client' || slice.admin_fee_payer === 'agent')) {
+              map[k].adminFee += slice.admin_fee
+            }
           })
         })
         rows = Object.values(map).sort((a,b)=>b.gross-a.gross).map(r=>[r.name,r.office,r.deals,fmt$(r.volume),fmt$(r.gross),fmt$(r.agentNet),fmt$(r.adminFee),fmt$(r.officeSplit),fmt$(r.officeSplit+r.adminFee)])
         break
       }
       case 'cap_progress': {
-        columns = ['Agent','Office','Plan','Cap Amount','Broker Paid YTD','Remaining','Progress','Status']
+        // Cap Progress overrides the date preset: each agent uses their own
+        // rollover window. Reads from enrichAgent's output.
+        columns = ['Agent','Office','Plan','Window','Cap Amount','Broker Paid','Remaining','Progress','Status']
         agents.filter(a=>a.plans?.type==='cap'&&a.status==='active').forEach(a => {
-          const pct = a.cap_amount ? Math.min(100,Math.round(a.broker_paid_ytd/a.cap_amount*100)) : 0
-          rows.push([a.first_name+' '+a.last_name,a.office||'—',a.plan_name,fmt$(a.cap_amount),fmt$(a.broker_paid_ytd),fmt$(a.cap_remaining),pct+'%',a.broker_paid_ytd>=(a.cap_amount||0)?'🎯 Capped':pct>=75?'🔥 Near cap':'In progress'])
+          const cp = getCapProgress([{ locked_broker_net: a.broker_paid_ytd }], a.cap_amount)
+          if (!cp) return
+          const pctDisplay = Math.round(cp.pct) + '%'
+          let status
+          if (cp.overage > 0)      status = '🎯 Capped + ' + fmt$(cp.overage) + ' over'
+          else if (cp.hit)         status = '🎯 Capped'
+          else if (cp.pct >= 75)   status = '🔥 Near cap'
+          else                     status = 'In progress'
+          rows.push([
+            a.first_name + ' ' + a.last_name,
+            a.office || '—',
+            a.plan_name,
+            a.cap_window_label || '—',
+            fmt$(a.cap_amount),
+            fmt$(a.broker_paid_ytd),
+            fmt$(a.cap_remaining),
+            pctDisplay,
+            status,
+          ])
         })
         break
       }
@@ -509,14 +624,17 @@ export default function Reports() {
         break
       }
       case 'agent_production': {
+        // Per-agent attribution from agent_slices — NO division by row count.
         columns = ['Rank','Agent','Office','Closed Deals','Total Volume','Gross GCI','Agent Net','Avg Sale Price']
         const map = {}
         closed.forEach(t => {
-          ;(t.transaction_agents||[]).forEach(ta => {
-            const a=ta.agents; if(!a) return
-            const k=ta.agent_id; const agentObj=allData.rawAgents.find(ag=>ag.id===k)
-            if(!map[k]) map[k]={name:a.first_name+' '+a.last_name,office:agentObj?.office||'—',deals:0,volume:0,gci:0,agentNet:0}
-            map[k].deals++; map[k].volume+=(t.sale_price||0); map[k].gci+=t.gross_commission; map[k].agentNet+=t.agent_net/(t.transaction_agents?.length||1)
+          (t.agent_slices || []).forEach(slice => {
+            const k = slice.agent_id
+            if (!map[k]) map[k] = { name: slice.agent_name, office: slice.office, deals: 0, volume: 0, gci: 0, agentNet: 0 }
+            map[k].deals++
+            map[k].volume   += (t.sale_price || 0)
+            map[k].gci      += slice.agent_gross
+            map[k].agentNet += slice.agent_net
           })
         })
         rows = Object.values(map).sort((a,b)=>b.gci-a.gci).map((r,i)=>['#'+(i+1),r.name,r.office,r.deals,fmt$(r.volume),fmt$(r.gci),fmt$(r.agentNet),fmt$(r.deals?r.volume/r.deals:0)])
@@ -525,7 +643,8 @@ export default function Reports() {
       case 'monthly_trend': {
         columns = ['Month','Closed Deals','Total Volume','Gross GCI','Agent Net','Admin Fees','Office Split','Total Office Income']
         const map = {}
-        transactions.filter(t=>t.status==='closed'&&t.close_date&&new Date(t.close_date).getFullYear()===thisYear).forEach(t => {
+        // Honor the user's date preset — closed in range
+        closed.forEach(t => {
           const mo = t.close_date.slice(0,7)
           if(!map[mo]) map[mo]={deals:0,volume:0,gci:0,agentNet:0,adminFee:0,officeSplit:0}
           map[mo].deals++; map[mo].volume+=(t.sale_price||0); map[mo].gci+=t.gross_commission; map[mo].agentNet+=t.agent_net; map[mo].adminFee+=t.admin_fee_collected; map[mo].officeSplit+=t.office_split
@@ -541,20 +660,27 @@ export default function Reports() {
         break
       }
       case 'pending_income': {
+        // Open deals use enriched per-agent slices (which use live calc with
+        // each agent's current cap window YTD — so post-cap previews are right).
         columns = ['Agent','Office','Address','Status','Sale Price','Est. Close','Proj. Gross','Agent Net','Admin Fee','Office Split','Total Office','Plan']
         open.forEach(t => {
-          ;(t.transaction_agents||[]).forEach(ta => {
-            const a=ta.agents; if(!a) return
-            const agentObj=allData.rawAgents.find(ag=>ag.id===ta.agent_id)
-            const plan=ta.plans||agentObj?.plans
-            const split=ta.split_type==='dollar'?ta.split_value:t.gross_commission*((ta.split_value||100)/100)
-            const agentPct=plan?.type==='cap'?(plan.cap_levels?.[0]?.pct||90):(plan?.agent_pct||80)
-            const fees=plan?.fees||[]; const feeItem=fees.find(f=>f.name==='Admin Fee')
-            const feeAmt=feeItem?.amt||0; const payer=t.admin_fee_payer||feeItem?.payer||'client'
-            let aN=split*(agentPct/100), bN=split*((100-agentPct)/100)
-            if(payer==='agent') aN-=feeAmt; else if(payer==='broker') bN-=feeAmt
-            const offAdmin=(payer==='client'||payer==='agent')?feeAmt:0
-            rows.push([a.first_name+' '+a.last_name,agentObj?.office||'—',t.street_address+', '+t.city,t.status,fmt$(t.sale_price),t.estimated_close_date||'—',fmt$(split),fmt$(aN),fmt$(offAdmin),fmt$(bN),fmt$(bN+offAdmin),plan?.name||'—'])
+          (t.agent_slices || []).forEach(slice => {
+            const plan = (allData.rawAgents.find(a => a.id === slice.agent_id))?.plans
+            const offAdmin = (slice.admin_fee_payer === 'client' || slice.admin_fee_payer === 'agent') ? slice.admin_fee : 0
+            rows.push([
+              slice.agent_name,
+              slice.office,
+              t.street_address + ', ' + t.city,
+              t.status,
+              fmt$(t.sale_price),
+              t.estimated_close_date || '—',
+              fmt$(slice.agent_gross),
+              fmt$(slice.agent_net),
+              fmt$(offAdmin),
+              fmt$(slice.broker_net),
+              fmt$(slice.broker_net + offAdmin),
+              plan?.name || '—',
+            ])
           })
         })
         rows.sort((a,b)=>{if(a[5]==='—')return 1;if(b[5]==='—')return -1;return a[5].localeCompare(b[5])})
@@ -570,80 +696,47 @@ export default function Reports() {
       case 'agent_pipeline': {
         const aid = activeFilters.agentId
         const inclCo = activeFilters.includeCoAgent !== false
-        const df = activeFilters.dateFrom, dt = activeFilters.dateTo
+        const df2 = activeFilters.dateFrom, dt2 = activeFilters.dateTo
 
-        // Require agent selection
         if (!aid) {
           setReportData({ columns: ['Notice'], rows: [['Please select an agent from the dropdown above to run this report.']], total: 0 })
           setLoading(false)
           return
         }
 
-        // Get all transactions where this agent appears (primary or co-agent)
+        // Pull transactions where this agent appears
         const agentTxns = transactions.filter(t => {
-          // Agent filter — check if selected agent appears on this deal
-          const tas = t.transaction_agents || []
-          if (aid) {
-            const agentEntry = tas.find(ta => ta.agent_id === aid)
-            if (!agentEntry) return false
-            const isPrimary = tas.indexOf(agentEntry) === 0
-            if (!isPrimary && !inclCo) return false // co-agent but checkbox off
-          }
-          // Date filter: closed deals by close_date, open deals by estimated_close_date
+          const slice = (t.agent_slices || []).find(s => s.agent_id === aid)
+          if (!slice) return false
+          if (!slice.is_primary && !inclCo) return false
+          // Date filter: closed by close_date, open by estimated_close_date
           if (t.status === 'closed') {
             const d = String(t.close_date || '').slice(0,10)
-            return d >= df.slice(0,10) && d <= dt.slice(0,10)
+            return d >= df2.slice(0,10) && d <= dt2.slice(0,10)
           }
           if (t.status === 'active' || t.status === 'pending') {
             const est = String(t.estimated_close_date || '').slice(0,10)
             if (!est || est.length < 10) return false
-            return est >= df.slice(0,10) && est <= dt.slice(0,10)
+            return est >= df2.slice(0,10) && est <= dt2.slice(0,10)
           }
           return false
         })
 
         const closedInRange = agentTxns.filter(t => t.status === 'closed')
-        const openDeals = agentTxns.filter(t => t.status === 'active' || t.status === 'pending')
+        const openDeals     = agentTxns.filter(t => t.status === 'active' || t.status === 'pending')
 
-
-        // Helper: compute a single agent's commission numbers from a transaction
-        function agentCalc(t, ta) {
-          const tas = t.transaction_agents || []
-          const taIdx = tas.findIndex(x => x.agent_id === ta.agent_id)
-          const isPrimary = taIdx === 0
-          const plan = ta.plans
-          const agentPct = plan?.type === 'cap' ? (plan.cap_levels?.[0]?.pct || 90) : (plan?.agent_pct || 80)
-          // split_value is this agent's % of the gross commission (e.g. 75 means 75% of gross goes to this agent's side)
-          // If only one agent, split_value should be 100
-          const splitPct = Number(ta.split_value ?? 100)
-          const agentGross = ta.split_type === 'dollar'
-            ? Number(ta.split_value || 0)
-            : t.gross_commission * (splitPct / 100)
-          const feeAmt = isPrimary ? (plan?.fees?.find(f => f.name === 'Admin Fee')?.amt || 0) : 0
-          const payer = t.admin_fee_payer || 'client'
-          let aN = agentGross * (agentPct / 100)
-          let oN = agentGross * ((100 - agentPct) / 100)
-          if (payer === 'agent') aN -= feeAmt
-          else if (payer === 'broker') oN -= feeAmt
-          const offAdmin = (payer === 'client' || payer === 'agent') ? feeAmt : 0
-          return { agentPct, split: agentGross, aN, oN, offAdmin, feeAmt, isPrimary, role: isPrimary ? 'Primary' : 'Co-Agent' }
-        }
-
-        // Section 1: Closed income summary
         columns = ['Section','Address','City','Role','Close Date','Sale Price','Agent Gross','Agent Split %','Agent Net','Admin Fee','Office Net','Lead Source']
-
 
         let closedAgentNet = 0, closedAgentGross = 0, closedVolume = 0
         closedInRange.forEach(t => {
-          const tas = t.transaction_agents || []
-          const tasToShow = aid ? tas.filter(ta => ta.agent_id === aid) : tas
-          tasToShow.forEach(ta => {
-            const c = agentCalc(t, ta)
-            closedAgentNet += c.aN
-            closedAgentGross += c.split
-            closedVolume += (t.sale_price || 0)
-            rows.push(['CLOSED', t.street_address, t.city, c.role, t.close_date||'—', fmt$(t.sale_price), fmt$(c.split), c.agentPct+'%', fmt$(c.aN), fmt$(c.offAdmin), fmt$(c.oN+c.offAdmin), t.lead_source||'—'])
-          })
+          const slice = (t.agent_slices || []).find(s => s.agent_id === aid)
+          if (!slice) return
+          const role = slice.is_primary ? 'Primary' : 'Co-Agent'
+          const offAdmin = (slice.admin_fee_payer === 'client' || slice.admin_fee_payer === 'agent') ? slice.admin_fee : 0
+          closedAgentNet   += slice.agent_net
+          closedAgentGross += slice.agent_gross
+          closedVolume     += (t.sale_price || 0)
+          rows.push(['CLOSED', t.street_address, t.city, role, t.close_date||'—', fmt$(t.sale_price), fmt$(slice.agent_gross), slice.agent_pct+'%', fmt$(slice.agent_net), fmt$(offAdmin), fmt$(slice.broker_net + offAdmin), t.lead_source||'—'])
         })
 
         if (closedInRange.length > 0) {
@@ -651,43 +744,35 @@ export default function Reports() {
           rows.push(['','','','','','','','','','','',''])
         }
 
-        // Section 2: Open pipeline
         let openAgentNet = 0, openAgentGross = 0, openVolume = 0
         openDeals.forEach(t => {
-          const tas = t.transaction_agents || []
-          const tasToShow = aid ? tas.filter(ta => ta.agent_id === aid) : tas
-          tasToShow.forEach(ta => {
-            const c = agentCalc(t, ta)
-            openAgentNet += c.aN
-            openAgentGross += c.split
-            openVolume += (t.sale_price || 0)
-            rows.push(['PIPELINE ('+t.status+')', t.street_address, t.city, c.role, t.estimated_close_date||'TBD', fmt$(t.sale_price), fmt$(c.split), c.agentPct+'%', fmt$(c.aN), fmt$(c.offAdmin), fmt$(c.oN+c.offAdmin), t.lead_source||'—'])
-          })
+          const slice = (t.agent_slices || []).find(s => s.agent_id === aid)
+          if (!slice) return
+          const role = slice.is_primary ? 'Primary' : 'Co-Agent'
+          const offAdmin = (slice.admin_fee_payer === 'client' || slice.admin_fee_payer === 'agent') ? slice.admin_fee : 0
+          openAgentNet   += slice.agent_net
+          openAgentGross += slice.agent_gross
+          openVolume     += (t.sale_price || 0)
+          rows.push(['PIPELINE ('+t.status+')', t.street_address, t.city, role, t.estimated_close_date||'TBD', fmt$(t.sale_price), fmt$(slice.agent_gross), slice.agent_pct+'%', fmt$(slice.agent_net), fmt$(offAdmin), fmt$(slice.broker_net + offAdmin), t.lead_source||'—'])
         })
 
         if (openDeals.length > 0) {
           rows.push(['PIPELINE TOTALS', openDeals.length + ' deals', '', '', '', fmt$(openVolume), fmt$(openAgentGross), '', fmt$(openAgentNet), '', '', ''])
         }
 
-        // Grand total — use the already-computed running totals
         rows.push(['', '', '', '', '', '', '', '', '', '', '', ''])
         rows.push(['GRAND TOTAL', (closedInRange.length + openDeals.length) + ' deals', '', '', '', fmt$(closedVolume + openVolume), fmt$(closedAgentGross + openAgentGross), '', fmt$(closedAgentNet + openAgentNet), '', '', ''])
 
-        // Cap progress section
-        if (aid && allData) {
-          const agentObj = allData.rawAgents.find(a => a.id === aid)
-          const plan = agentObj?.plans
-          if (plan?.type === 'cap') {
-            const thisYear = new Date().getFullYear()
-            const brokerPaid = transactions
-              .filter(t => t.status === 'closed' && t.close_date && new Date(t.close_date).getFullYear() === thisYear)
-              .flatMap(t => (t.transaction_agents||[]).filter(ta=>ta.agent_id===aid))
-              .reduce((s,ta) => s + (ta.locked_broker_net||0), 0)
-            const cap = plan.cap_amount || 0
-            const remaining = Math.max(0, cap - brokerPaid)
-            rows.push(['', '', '', '', '', '', '', '', '', '', '', ''])
-            rows.push(['CAP PROGRESS', plan.name, '', '', '', '', fmt$(cap) + ' cap', '', fmt$(Math.min(brokerPaid, cap)) + ' paid', '', fmt$(remaining) + ' remaining', brokerPaid >= cap ? '🎯 CAPPED' : Math.round(brokerPaid/cap*100) + '% to cap'])
-          }
+        // Cap progress — uses agent's rollover window (NOT the user's date preset)
+        const enrichedAgent = (allData.agents || []).find(a => a.id === aid)
+        if (enrichedAgent?.plans?.type === 'cap' && enrichedAgent.cap_amount > 0) {
+          const cp = getCapProgress([{ locked_broker_net: enrichedAgent.broker_paid_ytd }], enrichedAgent.cap_amount)
+          let capStatus
+          if (cp.overage > 0)    capStatus = '🎯 CAPPED + ' + fmt$(cp.overage) + ' over'
+          else if (cp.hit)       capStatus = '🎯 CAPPED'
+          else                   capStatus = Math.round(cp.pct) + '% to cap'
+          rows.push(['', '', '', '', '', '', '', '', '', '', '', ''])
+          rows.push(['CAP PROGRESS', enrichedAgent.plan_name + ' — ' + (enrichedAgent.cap_window_label || ''), '', '', '', '', fmt$(enrichedAgent.cap_amount) + ' cap', '', fmt$(enrichedAgent.broker_paid_ytd) + ' paid', '', fmt$(enrichedAgent.cap_remaining) + ' remaining', capStatus])
         }
 
         break
@@ -696,7 +781,6 @@ export default function Reports() {
       case 'trust_ledger': {
         columns = ['Transaction', 'City', 'Type', 'Amount', 'Received', 'Status', 'Released', 'Notes']
         const trust = allData.trustEntries || []
-        const statusFilter2 = builtinFilters.preset === 'all' ? null : null // show all by default
         trust.forEach(e => {
           const t = e.transactions
           rows.push([
@@ -710,8 +794,7 @@ export default function Reports() {
             e.notes || '—',
           ])
         })
-        rows.sort((a,b) => a[5].localeCompare(b[5])) // sort by status: Forfeited, Held, Released
-        // Summary rows
+        rows.sort((a,b) => a[5].localeCompare(b[5]))
         const held = trust.filter(e=>e.status==='held').reduce((s,e)=>s+(e.amount||0),0)
         const released = trust.filter(e=>e.status==='released').reduce((s,e)=>s+(e.amount||0),0)
         const forfeited = trust.filter(e=>e.status==='forfeited').reduce((s,e)=>s+(e.amount||0),0)
@@ -782,7 +865,7 @@ export default function Reports() {
           <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
             {isBuiltin && (
               <>
-                {!['pending_income','office_pipeline','projected_by_month','trust_ledger','agent_pipeline'].includes(activeReport.id) && <>
+                {!['pending_income','office_pipeline','projected_by_month','trust_ledger','agent_pipeline','cap_progress'].includes(activeReport.id) && <>
                   <select className="form-ctrl" value={builtinFilters.preset} onChange={e=>applyPreset(e.target.value)} style={{width:160}}>
                     {DATE_PRESETS.map(p=><option key={p.value} value={p.value}>{p.label}</option>)}
                   </select>
@@ -790,6 +873,9 @@ export default function Reports() {
                   <span style={{color:'rgba(255,255,255,.5)',fontSize:12}}>→</span>
                   <input className="form-ctrl" type="date" value={builtinFilters.dateTo} onChange={e=>setBuiltinFilters(f=>({...f,dateTo:e.target.value,preset:'custom'}))} style={{width:140}}/>
                 </>}
+                {activeReport.id === 'cap_progress' && (
+                  <span style={{fontSize:11,color:'rgba(255,255,255,.7)',fontStyle:'italic'}}>Each agent's rollover window</span>
+                )}
                 {['pending_income','office_pipeline','projected_by_month','trust_ledger'].includes(activeReport.id) && <>
                   <span style={{fontSize:11,color:'rgba(255,255,255,.5)'}}>Est. Close:</span>
                   <select className="form-ctrl" value={builtinFilters.preset} onChange={e=>applyPreset(e.target.value)} style={{width:160}}>
@@ -809,7 +895,6 @@ export default function Reports() {
                     }} style={{width:180}}>
                     <option value="">— Select Agent —</option>
                     {(()=>{
-                      // Only show agents who actually appear in transactions
                       const agentIdsInTxns = new Set((allData?.transactions||[]).flatMap(t=>(t.transaction_agents||[]).map(ta=>ta.agent_id)))
                       return (allData?.rawAgents||[]).filter(a=>a.status==='active'&&agentIdsInTxns.has(a.id)).sort((a,b)=>a.last_name.localeCompare(b.last_name)).map(a=><option key={a.id} value={a.id}>{a.first_name} {a.last_name}</option>)
                     })()}
@@ -831,7 +916,6 @@ export default function Reports() {
                 </>}
                 <button className="btn btn-navy btn-sm" onClick={()=>runBuiltinReport(activeReport.id, {...builtinFilters})}>↻ Run</button>
                 <button className="btn btn-ghost btn-sm" onClick={()=>{
-                  const base = FIELDS.transactions
                   setReport({...emptyReport(), name: activeReport.name + ' (Custom)', id: null})
                   setView('builder')
                 }}>✏ Customize</button>
@@ -874,7 +958,6 @@ export default function Reports() {
     function updFilter(i, key, val) {
       const f = [...report.filters]
       f[i] = {...f[i], [key]: val}
-      // Reset op when field changes
       if (key === 'field') {
         const fd = fields.find(fd=>fd.key===val)
         f[i].op = FILTER_OPS[fd?.type||'text'][0]
@@ -906,7 +989,6 @@ export default function Reports() {
           </div>
         </div>
 
-        {/* Report name + source */}
         <div className="card" style={{marginBottom:14}}>
           <div className="card-body">
             <div className="form-grid">
@@ -926,7 +1008,6 @@ export default function Reports() {
         </div>
 
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14,marginBottom:14}}>
-          {/* Columns */}
           <div className="card">
             <div className="card-hdr"><span className="card-title">Columns</span><span style={{fontSize:10,color:'var(--txt3)'}}>Check to include · arrows to reorder</span></div>
             <div style={{maxHeight:320,overflowY:'auto'}}>
@@ -952,7 +1033,6 @@ export default function Reports() {
             </div>
           </div>
 
-          {/* Sort + Group */}
           <div>
             <div className="card" style={{marginBottom:14}}>
               <div className="card-hdr"><span className="card-title">Sort & Group</span></div>
@@ -985,7 +1065,6 @@ export default function Reports() {
           </div>
         </div>
 
-        {/* Filters */}
         <div className="card">
           <div className="card-hdr">
             <span className="card-title">Filters</span>
