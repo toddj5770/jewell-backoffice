@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
-import { fmt$, licenseStatus, statusBadge, getCapProgress, filterRowsToCapWindow, formatCapWindow } from '../../lib/commission'
+import { fmt$, calcCommission, licenseStatus, statusBadge, getCapProgress, filterRowsToCapWindow, formatCapWindow } from '../../lib/commission'
 
 export default function Dashboard() {
   const navigate = useNavigate()
@@ -16,7 +16,7 @@ export default function Dashboard() {
     const [txns, agents, disbs, plans] = await Promise.all([
       supabase.from('transactions').select('*, transaction_agents(*)'),
       supabase.from('agents').select('*, plans(*)'),
-      supabase.from('disbursements').select('*, transactions(sale_price, selling_commission_pct, admin_fee_payer, deductions_withheld, transaction_agents(*))'),
+      supabase.from('disbursements').select('*, transactions(sale_price, selling_commission_pct, admin_fee_payer, deductions_withheld, transaction_agents(*, plans(*)))'),
       supabase.from('plans').select('*'),
     ])
 
@@ -43,14 +43,50 @@ export default function Dashboard() {
   const ytdGCI = ytdClosed.reduce((s, t) =>
     s + (t.sale_price || 0) * ((t.selling_commission_pct || 0) / 100), 0)
 
-  // Unpaid disbursements
-  const unpaidDisbs = disbursements.filter(d => !d.paid)
-  const unpaidTotal = unpaidDisbs.reduce((s, d) => {
+  // ── Pending disbursements ─────────────────────────────────────────────
+  // Mirror Money.jsx exactly so the two screens never disagree.
+  // (1) Amount owed on a row is the AGENT NET, read from the immutable
+  //     locked_agent_net on closed deals — NOT the full deal GCI.
+  // (2) Combined rows (agent_id === null) are hidden whenever Individual
+  //     rows exist for the same transaction, because payment is marked on
+  //     the Individual rows; counting the Combined row too would resurrect
+  //     fully-paid deals as "pending."
+  function rowAmount(d) {
     const t = d.transactions
-    if (!t) return s
-    const gross = (t.sale_price || 0) * ((t.selling_commission_pct || 0) / 100)
-    return s + gross
-  }, 0)
+    if (!t) return 0
+    const isCombined = d.agent_id === null
+    const tas = t.transaction_agents || []
+    const deduct = t.deductions_withheld || 0
+
+    function netFor(ta) {
+      // Prefer locked value on closed deals (immutable source of truth)
+      if (ta.locked_agent_net !== null && ta.locked_agent_net !== undefined) {
+        return Number(ta.locked_agent_net) || 0
+      }
+      // Fallback: recompute (open/unlocked deals only)
+      const comm = calcCommission(t, ta, ta.plans || null, 0, tas.indexOf(ta) === 0)
+      return comm?.agent_net || 0
+    }
+
+    if (isCombined) {
+      return tas.reduce((s, ta) => s + netFor(ta), 0) - deduct
+    }
+    const ta = tas.find(x => x.agent_id === d.agent_id)
+    if (!ta) return 0
+    return netFor(ta) - deduct
+  }
+
+  const txnHasIndividual = new Set(
+    disbursements.filter(d => d.agent_id !== null).map(d => d.transaction_id)
+  )
+  const visibleDisbs = disbursements.filter(d => {
+    if (d.agent_id === null && txnHasIndividual.has(d.transaction_id)) return false
+    return true
+  })
+
+  const unpaidTotal = visibleDisbs
+    .filter(d => !d.paid)
+    .reduce((s, d) => s + rowAmount(d), 0)
 
   // License alerts
   const licAlerts = agents.filter(a => {
@@ -60,6 +96,12 @@ export default function Dashboard() {
 
   // Active agents with cap plans
   const capAgents = agents.filter(a => a.plans?.type === 'cap' && a.status === 'active')
+
+  // Resolve agent_id -> "First Last" for display (agents already loaded)
+  const agentName = (id) => {
+    const a = agents.find(x => x.id === id)
+    return a ? `${a.first_name} ${a.last_name}` : id
+  }
 
   return (
     <div>
@@ -201,7 +243,7 @@ export default function Dashboard() {
             <tbody>
               {closed.slice(0, 8).map(t => {
                 const gci = (t.sale_price || 0) * ((t.selling_commission_pct || 0) / 100)
-                const agentNames = (t.transaction_agents || []).map(ta => ta.agent_id).join(', ')
+                const agentNames = (t.transaction_agents || []).map(ta => agentName(ta.agent_id)).join(', ')
                 return (
                   <tr key={t.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/transactions/${t.id}`)}>
                     <td><span className="tbl-link">{t.street_address}, {t.city}</span></td>
