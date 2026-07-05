@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
-import { fmt$, calcCommission, statusBadge } from '../../lib/commission'
+import { fmt$, calcCommission, statusBadge, txnGross } from '../../lib/commission'
 import { useAuth } from '../../hooks/useAuth'
 
 export default function AgentTransactionDetail() {
@@ -305,11 +305,11 @@ export default function AgentTransactionDetail() {
                 <input className="form-ctrl" type="number" step="0.1" value={txn.selling_commission_pct || ''} disabled={!canEdit} onChange={e => f('selling_commission_pct', e.target.value)} />
               </div>
             </div>
-            {Number(txn.sale_price) > 0 && Number(txn.selling_commission_pct) > 0 && (
+            {txnGross(txn) > 0 && (
               <div style={{ padding: '10px 14px', background: 'var(--teal-lt)', borderRadius: 'var(--r)', marginBottom: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span style={{ color: 'var(--txt2)', fontSize: 12 }}>Total Gross Commission</span>
                 <span style={{ fontSize: 20, fontWeight: 800, color: 'var(--teal)' }}>
-                  {fmt$((Number(txn.sale_price) || 0) * ((Number(txn.selling_commission_pct) || 0) / 100))}
+                  {fmt$(txnGross(txn))}
                 </span>
               </div>
             )}
