@@ -3,10 +3,11 @@ import html2pdf from 'html2pdf.js'
 import { useAuth } from '../../hooks/useAuth'
 import { useParams, useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
-import { fmt$, fmtPct, calcCommission, statusBadge, loadBrokerPaidYTD } from '../../lib/commission'
+import { fmt$, fmtPct, calcCommission, statusBadge, loadBrokerPaidYTD, txnGross } from '../../lib/commission'
 
 const EMPTY = {
   type:'selling',status:'active',street_address:'',city:'',state:'TN',zip:'',
+  client_name:'',commission_type:'percent',selling_commission_flat:'',
   sale_price:'',selling_commission_pct:3,lead_source:'',mortgage_company:'Cash',mls_number:'',
   close_date:'',estimated_close_date:'',contract_acceptance_date:'',
   admin_fee_payer:'client',buyers:[],sellers:[],
@@ -116,13 +117,15 @@ export default function TransactionDetail() {
 
   async function save() {
     setSaving(true)
-    if(!txn.street_address||!txn.city){alert('Address required');setSaving(false);return}
+    if(txn.type==='referral'){
+      if(!txn.client_name&&!txn.street_address){alert('Enter a client name (or an address) for this referral.');setSaving(false);return}
+    } else if(!txn.street_address||!txn.city){alert('Address required');setSaving(false);return}
     if(tas.length===0){alert('Add at least one agent');setSaving(false);return}
     if(tas.some(t=>!t.agent_id)){alert('Select an agent for each row');setSaving(false);return}
     const tot=tas.reduce((s,t)=>s+Number(t.split_value||0),0)
     if(tas.length>1&&tas[0].split_type==='percent'&&Math.abs(tot-100)>0.01){if(!window.confirm(`Splits total ${tot}% not 100%. Save?`)){setSaving(false);return}}
     let tid=id
-    const d={...txn,sale_price:txn.sale_price?Number(txn.sale_price):null,selling_commission_pct:txn.selling_commission_pct?Number(txn.selling_commission_pct):null,contract_acceptance_date:txn.contract_acceptance_date||null,estimated_close_date:txn.estimated_close_date||null,close_date:txn.close_date||null}
+    const d={...txn,sale_price:txn.sale_price?Number(txn.sale_price):null,selling_commission_pct:txn.selling_commission_pct?Number(txn.selling_commission_pct):null,selling_commission_flat:txn.selling_commission_flat?Number(txn.selling_commission_flat):null,commission_type:txn.commission_type||'percent',client_name:txn.client_name||null,contract_acceptance_date:txn.contract_acceptance_date||null,estimated_close_date:txn.estimated_close_date||null,close_date:txn.close_date||null}
     if(isNew){const{data,error}=await supabase.from('transactions').insert(d).select().single();if(error){alert(error.message);setSaving(false);return};tid=data.id}
     else await supabase.from('transactions').update(d).eq('id',tid)
 
@@ -189,7 +192,7 @@ export default function TransactionDetail() {
         const priorYtd = await loadBrokerPaidYTD(supabase, ta.agent_id, plan, agentRecord, txn.close_date, tid)
 
         const c = calcCommission(
-          { ...txn, sale_price: Number(txn.sale_price), selling_commission_pct: Number(txn.selling_commission_pct) },
+          { ...txn, sale_price: Number(txn.sale_price), selling_commission_pct: Number(txn.selling_commission_pct), selling_commission_flat: Number(txn.selling_commission_flat) || 0 },
           ta, plan, priorYtd, i === 0
         )
         const required = ['gross', 'pct', 'agent_gross', 'agent_net', 'broker_net']
@@ -224,14 +227,23 @@ export default function TransactionDetail() {
     const cd = window.prompt('Close date (YYYY-MM-DD):', new Date().toISOString().slice(0,10))
     if (!cd) return
 
-    // Pre-flight validation
-    if (!txn.sale_price || Number(txn.sale_price) <= 0) {
-      alert('Cannot close: sale price must be greater than zero.')
-      return
-    }
-    if (!txn.selling_commission_pct || Number(txn.selling_commission_pct) <= 0) {
-      alert('Cannot close: commission % must be greater than zero.')
-      return
+    // Pre-flight validation — flat (referral) deals validate the flat amount;
+    // percent deals validate sale price + commission %.
+    const closeBasis = txn.commission_type === 'flat' ? 'flat' : 'percent'
+    if (closeBasis === 'flat') {
+      if (!txn.selling_commission_flat || Number(txn.selling_commission_flat) <= 0) {
+        alert('Cannot close: flat commission amount must be greater than zero.')
+        return
+      }
+    } else {
+      if (!txn.sale_price || Number(txn.sale_price) <= 0) {
+        alert('Cannot close: sale price must be greater than zero.')
+        return
+      }
+      if (!txn.selling_commission_pct || Number(txn.selling_commission_pct) <= 0) {
+        alert('Cannot close: commission % must be greater than zero.')
+        return
+      }
     }
     if (tas.length === 0) {
       alert('Cannot close: at least one agent is required.')
@@ -275,7 +287,7 @@ export default function TransactionDetail() {
         return
       }
       const c = calcCommission(
-        { ...txn, sale_price: Number(txn.sale_price), selling_commission_pct: Number(txn.selling_commission_pct) },
+        { ...txn, sale_price: Number(txn.sale_price), selling_commission_pct: Number(txn.selling_commission_pct), selling_commission_flat: Number(txn.selling_commission_flat) || 0 },
         ta, plan, freshYtd[ta.agent_id] || 0, i === 0
       )
       const required = ['gross', 'pct', 'agent_gross', 'agent_net', 'broker_net']
@@ -397,7 +409,9 @@ export default function TransactionDetail() {
   if(loading) return <div className="loading"><div className="spinner"/>Loading…</div>
 
   const isClosed=txn.status==='closed', isCancelled=txn.status==='cancelled', canEdit=(!isClosed&&!isCancelled)||isBroker
-  const gross=(Number(txn.sale_price)||0)*((Number(txn.selling_commission_pct)||0)/100)
+  const isReferral=txn.type==='referral'
+  const commBasis=txn.commission_type==='flat'?'flat':'percent'
+  const gross=txnGross(txn)
   const totalSplit=tas.reduce((s,t)=>s+Number(t.split_value||0),0)
   const combinedDisb=disbs.find(d=>d.agent_id===null)
   const indivDisbs=disbs.filter(d=>d.agent_id!==null)
@@ -407,6 +421,7 @@ export default function TransactionDetail() {
   // (or all agents if agentId is null).
   function buildDisbursementHTML(agentId) {
     const isDraft = !isClosed
+    const isFlat = txn.commission_type === 'flat'
     const agentsToShow = agentId ? tas.filter(t=>t.agent_id===agentId) : tas
     if(agentsToShow.length===0) return null
 
@@ -430,8 +445,13 @@ export default function TransactionDetail() {
       lines += '<div style="margin-bottom:32px;border:1px solid #ddd;border-radius:8px;overflow:hidden;">'
       lines += '<div style="background:#0f2744;color:#fff;padding:10px 16px;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;">Commission Statement — ' + agentName + '</div>'
       lines += '<div style="padding:16px;"><table style="width:100%;border-collapse:collapse;">'
-      lines += '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;width:55%;">Sale Price</td><td style="padding:7px 0;border-bottom:1px solid #eee;font-weight:600;text-align:right;">' + fp(txn.sale_price) + '</td></tr>'
-      lines += '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;">Commission Rate</td><td style="padding:7px 0;border-bottom:1px solid #eee;text-align:right;">' + txn.selling_commission_pct + '%</td></tr>'
+      if (isFlat) {
+        lines += '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;width:55%;">Commission Basis</td><td style="padding:7px 0;border-bottom:1px solid #eee;text-align:right;">Flat / Referral</td></tr>'
+        lines += '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;">Flat Commission</td><td style="padding:7px 0;border-bottom:1px solid #eee;font-weight:600;text-align:right;">' + fp(txn.selling_commission_flat) + '</td></tr>'
+      } else {
+        lines += '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;width:55%;">Sale Price</td><td style="padding:7px 0;border-bottom:1px solid #eee;font-weight:600;text-align:right;">' + fp(txn.sale_price) + '</td></tr>'
+        lines += '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;">Commission Rate</td><td style="padding:7px 0;border-bottom:1px solid #eee;text-align:right;">' + txn.selling_commission_pct + '%</td></tr>'
+      }
       lines += '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;">Gross Commission (this split)</td><td style="padding:7px 0;border-bottom:1px solid #eee;font-weight:600;text-align:right;">' + fp(comm.gross) + '</td></tr>'
       lines += '<tr><td style="padding:7px 0;border-bottom:1px solid #eee;color:#666;">Agent Split (' + comm.pct + '%)</td><td style="padding:7px 0;border-bottom:1px solid #eee;text-align:right;">' + fp(comm.agent_gross) + '</td></tr>'
       lines += adminRow
@@ -453,7 +473,9 @@ export default function TransactionDetail() {
     const status = isDraft ? 'DRAFT' : 'FINAL'
     const closeInfo = txn.close_date || txn.estimated_close_date || 'TBD'
     const mlsRow = txn.mls_number ? '<div style="font-size:11px;color:#999;">MLS # ' + txn.mls_number + '</div>' : ''
-    const propertyAddress = (txn.street_address||'') + (txn.city ? (', ' + txn.city) : '')
+    const propertyAddress = txn.street_address
+      ? (txn.street_address + (txn.city ? (', ' + txn.city) : ''))
+      : (txn.client_name || 'Referral')
 
     const html = '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Commission Disbursement</title>'
       + '<style>body{font-family:Segoe UI,system-ui,sans-serif;font-size:13px;color:#1a1a1a;margin:0;padding:0;}@media print{.no-print{display:none!important;}}</style>'
@@ -462,8 +484,8 @@ export default function TransactionDetail() {
       + '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:24px;padding-bottom:16px;border-bottom:3px solid #0f2744;">'
       + '<div><div style="font-size:24px;font-weight:800;color:#0f2744;">Jewell Real Estate</div><div style="font-size:12px;color:#888;margin-top:2px;">Commission Disbursement Statement</div></div>'
       + '<div style="text-align:right;"><div style="font-size:11px;color:#888;">' + status + ' · ' + new Date().toLocaleDateString() + '</div>'
-      + '<div style="font-size:13px;font-weight:700;margin-top:4px;">' + (txn.street_address||'') + '</div>'
-      + '<div style="font-size:12px;color:#666;">' + (txn.city||'') + ', ' + (txn.state||'') + ' ' + (txn.zip||'') + '</div>'
+      + '<div style="font-size:13px;font-weight:700;margin-top:4px;">' + (txn.street_address || txn.client_name || '') + '</div>'
+      + '<div style="font-size:12px;color:#666;">' + (txn.street_address ? ((txn.city||'') + ', ' + (txn.state||'') + ' ' + (txn.zip||'')) : (txn.type==='referral' ? 'Referral' : '')) + '</div>'
       + '<div style="font-size:12px;color:#666;">Close: ' + closeInfo + '</div>'
       + mlsRow + '</div></div>'
       + lines
@@ -620,8 +642,8 @@ export default function TransactionDetail() {
       <div className="back-btn" onClick={()=>navigate('/transactions')}>← Back to Transactions</div>
       <div className="sec-hdr">
         <div>
-          <div className="sec-title">{isNew?'New Transaction':txn.street_address||'Transaction'}</div>
-          <div className="sec-sub">{!isNew&&<>{txn.city}, {txn.state} &nbsp;·&nbsp; {statusBadge(txn.status)}</>}</div>
+          <div className="sec-title">{isNew?'New Transaction':(txn.street_address||txn.client_name||'Transaction')}</div>
+          <div className="sec-sub">{!isNew&&<>{isReferral&&!txn.street_address?'Referral':`${txn.city||''}${txn.state?', '+txn.state:''}`} &nbsp;·&nbsp; {statusBadge(txn.status)}</>}</div>
         </div>
         <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
           {canEdit&&!isNew&&<>
@@ -663,14 +685,15 @@ export default function TransactionDetail() {
         <div className="card">
           <div className="card-hdr"><span className="card-title">Property</span></div>
           <div className="card-body">
-            <div className="form-group"><label className="form-label">Street Address <span className="req">*</span></label><input className="form-ctrl" value={txn.street_address} disabled={isClosed} onChange={e=>f('street_address',e.target.value)}/></div>
+            {isReferral&&<div className="form-group"><label className="form-label">Client Name <span className="req">*</span></label><input className="form-ctrl" value={txn.client_name||''} disabled={isClosed} onChange={e=>f('client_name',e.target.value)}/></div>}
+            <div className="form-group"><label className="form-label">Street Address {isReferral?<span style={{fontSize:10,color:'var(--txt3)'}}>— optional</span>:<span className="req">*</span>}</label><input className="form-ctrl" value={txn.street_address||''} disabled={isClosed} onChange={e=>f('street_address',e.target.value)}/></div>
             <div className="form-grid-3">
-              <div className="form-group"><label className="form-label">City <span className="req">*</span></label><input className="form-ctrl" value={txn.city} disabled={isClosed} onChange={e=>f('city',e.target.value)}/></div>
+              <div className="form-group"><label className="form-label">City {!isReferral&&<span className="req">*</span>}</label><input className="form-ctrl" value={txn.city||''} disabled={isClosed} onChange={e=>f('city',e.target.value)}/></div>
               <div className="form-group"><label className="form-label">State</label><input className="form-ctrl" value={txn.state} disabled={isClosed} onChange={e=>f('state',e.target.value)}/></div>
               <div className="form-group"><label className="form-label">ZIP</label><input className="form-ctrl" value={txn.zip||''} disabled={isClosed} onChange={e=>f('zip',e.target.value)}/></div>
             </div>
             <div className="form-grid">
-              <div className="form-group"><label className="form-label">Type</label><select className="form-ctrl" value={txn.type} disabled={isClosed} onChange={e=>f('type',e.target.value)}>{(settings?.transaction_types||['selling','listing','dual','rental','referral']).map(t=><option key={t} value={t} style={{textTransform:'capitalize'}}>{t}</option>)}</select></div>
+              <div className="form-group"><label className="form-label">Type</label><select className="form-ctrl" value={txn.type} disabled={isClosed} onChange={e=>{const v=e.target.value;f('type',v);if(v==='referral'&&txn.commission_type!=='flat')f('commission_type','flat')}}>{(settings?.transaction_types||['selling','listing','dual','rental','referral']).map(t=><option key={t} value={t} style={{textTransform:'capitalize'}}>{t}</option>)}</select></div>
               <div className="form-group"><label className="form-label">MLS #</label><input className="form-ctrl" value={txn.mls_number||''} disabled={isClosed} onChange={e=>f('mls_number',e.target.value)}/></div>
             </div>
             <div className="form-grid">
@@ -683,8 +706,14 @@ export default function TransactionDetail() {
           <div className="card-hdr"><span className="card-title">Commission & Dates</span></div>
           <div className="card-body">
             <div className="form-grid">
-              <div className="form-group"><label className="form-label">Sale Price</label><input className="form-ctrl" type="number" value={txn.sale_price||''} disabled={isClosed} onChange={e=>f('sale_price',e.target.value)}/></div>
-              <div className="form-group"><label className="form-label">Commission %</label><input className="form-ctrl" type="number" step="0.1" value={txn.selling_commission_pct||''} disabled={isClosed} onChange={e=>f('selling_commission_pct',e.target.value)}/></div>
+              <div className="form-group"><label className="form-label">Sale Price {commBasis==='flat'&&<span style={{fontSize:10,color:'var(--txt3)'}}>— optional</span>}</label><input className="form-ctrl" type="number" value={txn.sale_price||''} disabled={isClosed} onChange={e=>f('sale_price',e.target.value)}/></div>
+              <div className="form-group"><label className="form-label">Commission Basis</label><select className="form-ctrl" value={txn.commission_type||'percent'} disabled={isClosed} onChange={e=>f('commission_type',e.target.value)}><option value="percent">Percent %</option><option value="flat">Flat $</option></select></div>
+            </div>
+            <div className="form-grid">
+              {commBasis==='flat'
+                ? <div className="form-group"><label className="form-label">Commission $ (flat)</label><input className="form-ctrl" type="number" step="0.01" value={txn.selling_commission_flat||''} disabled={isClosed} onChange={e=>f('selling_commission_flat',e.target.value)}/></div>
+                : <div className="form-group"><label className="form-label">Commission %</label><input className="form-ctrl" type="number" step="0.1" value={txn.selling_commission_pct||''} disabled={isClosed} onChange={e=>f('selling_commission_pct',e.target.value)}/></div>}
+              <div className="form-group"></div>
             </div>
             {gross>0&&<div style={{padding:'10px 14px',background:'var(--teal-lt)',borderRadius:'var(--r)',marginBottom:14,display:'flex',justifyContent:'space-between',alignItems:'center'}}><span style={{color:'var(--txt2)',fontSize:12}}>Gross Commission</span><span style={{fontSize:20,fontWeight:800,color:'var(--teal)'}}>{fmt$(gross)}</span></div>}
             <div className="form-grid">
