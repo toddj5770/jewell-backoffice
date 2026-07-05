@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
 import {
   fmt$, statusBadge, getCapProgress, licenseStatus,
-  filterRowsToCapWindow, formatCapWindow, sumAgentNetYTD,
+  filterRowsToCapWindow, formatCapWindow, sumAgentNetYTD, txnGross,
 } from '../../lib/commission'
 import { useAuth } from '../../hooks/useAuth'
 
@@ -178,10 +178,10 @@ export default function AgentDashboard() {
                 // Prefer locked_agent_net (true take-home); fall back to gross calc for open deals
                 const myAmount = (ta.locked_agent_net !== null && ta.locked_agent_net !== undefined)
                   ? Number(ta.locked_agent_net)
-                  : (t.sale_price || 0) * ((t.selling_commission_pct || 0) / 100) * (ta.split_value / 100)
+                  : txnGross(t) * (ta.split_value / 100)
                 return (
                   <tr key={ta.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/my-transactions/${t.id}`)}>
-                    <td><span className="tbl-link">{t.street_address}, {t.city}</span></td>
+                    <td><span className="tbl-link">{t.street_address ? `${t.street_address}, ${t.city}` : (t.client_name || 'Referral')}</span></td>
                     <td><span className="badge badge-navy">{t.type}</span></td>
                     <td>{t.close_date || '—'}</td>
                     <td style={{ color: 'var(--teal)', fontWeight: 600 }}>{fmt$(myAmount)}</td>
