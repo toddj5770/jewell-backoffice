@@ -9,6 +9,25 @@ export function fmtPct(n) {
 }
 
 /**
+ * Total gross commission for a transaction, honoring commission_type.
+ * Single source of truth for "what did this deal gross" — use everywhere a
+ * live GCI/gross figure is computed so flat-fee (referral) deals count too.
+ *
+ * - 'flat'    → the flat dollar amount (selling_commission_flat).
+ *               Used for referrals and any flat-fee deal.
+ * - 'percent' → sale_price × selling_commission_pct.
+ *               The default, and how every legacy row (commission_type null)
+ *               is treated.
+ */
+export function txnGross(txn) {
+  if (!txn) return 0
+  if (txn.commission_type === 'flat') {
+    return Number(txn.selling_commission_flat || 0)
+  }
+  return Number(txn.sale_price || 0) * (Number(txn.selling_commission_pct || 0) / 100)
+}
+
+/**
  * Calculate commission for a transaction_agent row
  * @param {object} txn - transaction record
  * @param {object} ta - transaction_agents row (with split_value, split_type, volume_pct, plan)
@@ -30,7 +49,10 @@ export function calcCommission(txn, ta, plan, brokerPaidYTD = 0, isPrimary = tru
   }
 
   // --- Compute gross for this agent's split ---
-  const totalGross = (txn.sale_price || 0) * ((txn.selling_commission_pct || 0) / 100)
+  // txnGross honors commission_type: percent (sale_price × pct) or flat
+  // (selling_commission_flat, used for referrals). Everything downstream —
+  // split %, cap tiers, admin fee, locking — is unchanged.
+  const totalGross = txnGross(txn)
   let agentGross = totalGross
 
   if (ta) {
