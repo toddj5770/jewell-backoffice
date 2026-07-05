@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../../lib/supabase'
-import { fmt$ } from '../../lib/commission'
+import { fmt$, txnGross } from '../../lib/commission'
 import { useAuth } from '../../hooks/useAuth'
 
 // ── Agent-facing reports (scoped to this agent only) ─────────
@@ -102,7 +102,7 @@ export default function AgentReports() {
   }
 
   function enrichTransaction(t, myAgentId) {
-    const gross = (t.sale_price || 0) * ((t.selling_commission_pct || 0) / 100)
+    const gross = txnGross(t)
     const tas = t.transaction_agents || []
     const myTa = tas.find(ta => ta.agent_id === myAgentId)
     if (!myTa) return { ...t, mine: null }
