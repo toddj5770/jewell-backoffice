@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
-import { fmt$, statusBadge } from '../../lib/commission'
+import { fmt$, statusBadge, txnGross } from '../../lib/commission'
 
 export default function Transactions() {
   const navigate = useNavigate()
@@ -27,6 +27,7 @@ export default function Transactions() {
     const q = search.toLowerCase()
     const matchSearch = !q ||
       t.street_address?.toLowerCase().includes(q) ||
+      t.client_name?.toLowerCase().includes(q) ||
       t.city?.toLowerCase().includes(q) ||
       t.mls_number?.toLowerCase().includes(q) ||
       (t.transaction_agents || []).some(ta =>
@@ -68,11 +69,11 @@ export default function Transactions() {
             </thead>
             <tbody>
               {filtered.map(t => {
-                const gci = (t.sale_price||0) * ((t.selling_commission_pct||0)/100)
+                const gci = txnGross(t)
                 const agents = (t.transaction_agents||[]).map(ta => `${ta.agents?.first_name||''} ${ta.agents?.last_name||''}`.trim()).filter(Boolean).join(', ')
                 return (
                   <tr key={t.id} style={{cursor:'pointer'}} onClick={() => navigate(`/transactions/${t.id}`)}>
-                    <td><span className="tbl-link">{t.street_address}</span><div style={{fontSize:11,color:'var(--txt3)'}}>{t.city}, {t.state}</div></td>
+                    <td><span className="tbl-link">{t.street_address||t.client_name||'—'}</span><div style={{fontSize:11,color:'var(--txt3)'}}>{t.type==='referral'&&!t.street_address?'Referral':`${t.city||''}${t.state?', '+t.state:''}`}</div></td>
                     <td><span className="badge badge-navy" style={{textTransform:'capitalize'}}>{t.type}</span></td>
                     <td style={{fontSize:12}}>{agents||'—'}</td>
                     <td>{t.sale_price ? fmt$(t.sale_price) : '—'}</td>
