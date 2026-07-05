@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
-import { fmt$, statusBadge } from '../../lib/commission'
+import { fmt$, statusBadge, txnGross } from '../../lib/commission'
 import { useAuth } from '../../hooks/useAuth'
 
 export default function AgentTransactions() {
@@ -44,7 +44,7 @@ export default function AgentTransactions() {
               {rows.map(ta => {
                 const t = ta.transactions
                 if (!t) return null
-                const myGross = (t.sale_price || 0) * ((t.selling_commission_pct || 0) / 100) * (ta.split_value / 100)
+                const myGross = txnGross(t) * (ta.split_value / 100)
                 return (
                   <tr
                     key={ta.id}
@@ -52,8 +52,8 @@ export default function AgentTransactions() {
                     style={{ cursor: 'pointer' }}
                   >
                     <td>
-                      <span className="tbl-link">{t.street_address}</span>
-                      <div style={{ fontSize: 11, color: 'var(--txt3)' }}>{t.city}, {t.state}</div>
+                      <span className="tbl-link">{t.street_address || t.client_name || '—'}</span>
+                      <div style={{ fontSize: 11, color: 'var(--txt3)' }}>{t.type === 'referral' && !t.street_address ? 'Referral' : `${t.city || ''}${t.state ? ', ' + t.state : ''}`}</div>
                     </td>
                     <td><span className="badge badge-navy" style={{ textTransform: 'capitalize' }}>{t.type}</span></td>
                     <td>{ta.split_value}{ta.split_type === 'percent' ? '%' : ' flat'}</td>
