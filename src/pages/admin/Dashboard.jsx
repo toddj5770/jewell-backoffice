@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
-import { fmt$, calcCommission, licenseStatus, statusBadge, getCapProgress, filterRowsToCapWindow, formatCapWindow } from '../../lib/commission'
+import { fmt$, calcCommission, licenseStatus, statusBadge, getCapProgress, filterRowsToCapWindow, formatCapWindow, txnGross } from '../../lib/commission'
 
 export default function Dashboard() {
   const navigate = useNavigate()
@@ -40,8 +40,7 @@ export default function Dashboard() {
 
   // YTD GCI — still calendar year, since this is a brokerage-wide metric, not per-agent cap
   const ytdClosed = closed.filter(t => t.close_date && new Date(t.close_date).getFullYear() === thisYear)
-  const ytdGCI = ytdClosed.reduce((s, t) =>
-    s + (t.sale_price || 0) * ((t.selling_commission_pct || 0) / 100), 0)
+  const ytdGCI = ytdClosed.reduce((s, t) => s + txnGross(t), 0)
 
   // ── Pending disbursements ─────────────────────────────────────────────
   // Mirror Money.jsx exactly so the two screens never disagree.
@@ -242,11 +241,11 @@ export default function Dashboard() {
             </thead>
             <tbody>
               {closed.slice(0, 8).map(t => {
-                const gci = (t.sale_price || 0) * ((t.selling_commission_pct || 0) / 100)
+                const gci = txnGross(t)
                 const agentNames = (t.transaction_agents || []).map(ta => agentName(ta.agent_id)).join(', ')
                 return (
                   <tr key={t.id} style={{ cursor: 'pointer' }} onClick={() => navigate(`/transactions/${t.id}`)}>
-                    <td><span className="tbl-link">{t.street_address}, {t.city}</span></td>
+                    <td><span className="tbl-link">{t.street_address ? `${t.street_address}, ${t.city}` : (t.client_name || '—')}</span></td>
                     <td>{t.close_date}</td>
                     <td>{fmt$(t.sale_price)}</td>
                     <td>{fmt$(gci)}</td>
