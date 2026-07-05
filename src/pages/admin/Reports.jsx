@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../../lib/supabase'
-import { fmt$, calcCommission, filterRowsToCapWindow, formatCapWindow, getCapProgress } from '../../lib/commission'
+import { fmt$, calcCommission, filterRowsToCapWindow, formatCapWindow, getCapProgress, txnGross } from '../../lib/commission'
 
 // ── All available fields per source ─────────────────────────
 const FIELDS = {
@@ -310,7 +310,7 @@ export default function Reports() {
   // Per-agent slices are tracked in `agent_slices` so reports can attribute
   // correctly to individual agents (not divide totals by agent count).
   function enrichTransaction(t, brokerPaidYTDLookup) {
-    const gross = (t.sale_price || 0) * ((t.selling_commission_pct || 0) / 100)
+    const gross = txnGross(t)
     const tas = t.transaction_agents || []
     const agent_slices = []
     let totalAgentNet = 0
