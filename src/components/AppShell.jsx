@@ -57,6 +57,10 @@ export default function AppShell() {
           </div>
         </div>
         <div className="hdr-right">
+          <a className="btn btn-ghost btn-sm" href="https://jewell-crm.netlify.app"
+            style={{color:'var(--gold)',borderColor:'var(--gold)',textDecoration:'none',fontWeight:700}}>
+            CRM →
+          </a>
           <span className="hdr-user">{name}</span>
           <span className="hdr-badge">{roleLabel}</span>
           <button className="btn btn-ghost btn-sm" onClick={()=>{ setShowPwModal(true); setPwForm({pw:'',confirm:'',error:'',done:false,saving:false}) }}
